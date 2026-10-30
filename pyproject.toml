@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reuseguard"
+dynamic = ["version"]
+description = "Orchestrate existing security tools to vet open-source projects before you reuse them."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ReuseGuard contributors" }]
+keywords = [
+    "security",
+    "supply-chain",
+    "open-source",
+    "code-reuse",
+    "static-analysis",
+    "orchestration",
+    "developer-tools",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = ["httpx>=0.27,<1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
+
+[project.scripts]
+reuseguard = "reuseguard.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/guoyi611/ReuseGuard"
+Issues = "https://github.com/guoyi611/ReuseGuard/issues"
+Changelog = "https://github.com/guoyi611/ReuseGuard/releases"
+
+[tool.hatch.version]
+path = "src/reuseguard/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reuseguard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "network: tests that call live GitHub or OpenSSF Scorecard services",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["reuseguard"]

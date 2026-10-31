@@ -4,7 +4,8 @@
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
 > 当前版本：`0.4.0`
-> 基线提交：`git log --oneline -1`（M5 第一步 Semgrep；M4 基线为 `f39c84b`）
+> 基线提交：`c711b42 feat: add local-only Semgrep scanner adapter`（M5 第一步；
+> M4 基线为 `f39c84b`）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -219,7 +220,8 @@ python -m build
 ## 6. 关键设计取舍
 
 - **不用 `git clone`**：codeload tarball，避免 hooks / submodule / 本地 config。
-- **静态扫描是内置规则，不是 Semgrep**：保证零重依赖；适配器边界留给 M5。
+- **静态扫描默认内置规则**：保证零重依赖；Semgrep 作为可选适配器，需要显式
+  `--semgrep-config` 才启用。
 - **Scorecard 只读公开 API**：不执行第三方构建；未收录时 `UNKNOWN → INSPECT`。
 - **不使用 LLM**：召回是 GitHub Search + 关键词，不是语义搜索。
 - **误报抑制**：docs/tests/examples/fixtures 降权；vendor/generated/minified 跳过。

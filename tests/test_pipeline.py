@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from reuseguard.adapters.sandbox import CommandResult, DockerStatus
+from reuseguard.adapters.process import CommandResult
+from reuseguard.adapters.sandbox import DockerStatus
 from reuseguard.adapters.snapshot import SnapshotError
 from reuseguard.config import Settings
 from reuseguard.models import Decision, FilterStatus, RepoRef, RiskLevel, SandboxStatus, ScanStatus
@@ -453,3 +455,129 @@ def test_sandbox_does_not_run_when_scan_was_rejected() -> None:
     assert assessment.sandbox is None
     assert detector.calls == 0
     assert runner.calls == []
+
+
+# --- Semgrep integration ----------------------------------------------------
+
+
+def _semgrep_output(path: str = "app.py", severity: str = "ERROR") -> str:
+    return json.dumps(
+        {
+            "version": "1.90.0",
+            "results": [
+                {
+                    "check_id": "python.lang.security.audit.eval",
+                    "path": path,
+                    "start": {"line": 3, "col": 1},
+                    "extra": {
+                        "message": "Detected eval",
+                        "severity": severity,
+                        "lines": "eval(user_input)",
+                        "metadata": {"category": "security"},
+                    },
+                }
+            ],
+            "errors": [],
+            "paths": {"scanned": [path], "skipped": []},
+        }
+    )
+
+
+def _semgrep_config(tmp_path: Path) -> Path:
+    config = tmp_path / "semgrep.yaml"
+    config.write_text("rules: []\n", encoding="utf-8")
+    return config
+
+
+def test_semgrep_scanner_replaces_the_builtin_scanner(tmp_path: Path) -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = FakeCommandRunner([CommandResult(argv=(), returncode=0, stdout=_semgrep_output())])
+
+    def builtin_must_not_run(*_args, **_kwargs):
+        raise AssertionError("built-in scanner should not run when Semgrep succeeds")
+
+    report = Pipeline(
+        Settings(max_candidates=0, semgrep_config=str(_semgrep_config(tmp_path))),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory({"app.py": "eval(user_input)\n"}),
+        scan_fn=builtin_must_not_run,
+        semgrep_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.SCANNED
+    assert assessment.scan.scanner == "semgrep"
+    assert assessment.scan.risk is RiskLevel.HIGH
+    assert assessment.verdict.decision is Decision.AVOID
+    assert runner.calls[0][0][0] == "semgrep"
+
+
+def test_semgrep_missing_binary_falls_back_to_builtin(tmp_path: Path) -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = FakeCommandRunner(
+        [CommandResult(argv=(), returncode=None, stderr="executable not found")]
+    )
+
+    report = Pipeline(
+        Settings(max_candidates=0, semgrep_config=str(_semgrep_config(tmp_path))),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_RISKY_FILES),
+        semgrep_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.scanner == "builtin-patterns"
+    assert assessment.scan.risk is RiskLevel.HIGH
+    assert any("used the built-in scanner" in warning for warning in report.warnings)
+
+
+def test_semgrep_failure_does_not_silently_fall_back(tmp_path: Path) -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = FakeCommandRunner([CommandResult(argv=(), returncode=2, stderr="bad config")])
+
+    def builtin_must_not_run(*_args, **_kwargs):
+        raise AssertionError("a configured Semgrep failure must not fall back")
+
+    report = Pipeline(
+        Settings(max_candidates=0, semgrep_config=str(_semgrep_config(tmp_path))),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        scan_fn=builtin_must_not_run,
+        semgrep_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.ERROR
+    assert assessment.scan.scanner == "semgrep"
+    assert assessment.verdict.decision is Decision.INSPECT
+    assert "bad config" in (assessment.scan.error or "")
+
+
+def test_semgrep_missing_config_is_a_scan_error(tmp_path: Path) -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+
+    report = Pipeline(
+        Settings(
+            max_candidates=0,
+            semgrep_config=str(tmp_path / "missing.yaml"),
+        ),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        semgrep_runner=FakeCommandRunner(),
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.ERROR
+    assert "config path does not exist" in (assessment.scan.error or "")

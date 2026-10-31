@@ -15,8 +15,10 @@ from reuseguard.models import (
     Decision,
     FilterResult,
     FilterStatus,
+    Finding,
     RepoMeta,
     Report,
+    RiskLevel,
     SandboxReport,
     SandboxStatus,
     ScanReport,
@@ -257,3 +259,40 @@ def test_demo_json_includes_sandbox_evidence() -> None:
     assert payload["assessments"][3]["sandbox"]["status"] == "completed"
     assert payload["assessments"][3]["sandbox"]["containment_ok"] is True
     assert payload["assessments"][0]["sandbox"] is None
+
+
+def test_external_rule_id_is_escaped_in_tables() -> None:
+    repo = RepoMeta(full_name="acme/seed", html_url="https://github.com/acme/seed")
+    report = Report(
+        tool_version="0.4.0",
+        generated_at=datetime.now(timezone.utc),
+        seed=repo,
+        assessments=[
+            Assessment(
+                candidate=Candidate(repo=repo),
+                filter=FilterResult(status=FilterStatus.PASSED, score=8.0),
+                scan=ScanReport(
+                    status=ScanStatus.SCANNED,
+                    risk=RiskLevel.HIGH,
+                    files_scanned=1,
+                    scanner="semgrep",
+                    findings=[
+                        Finding(
+                            rule_id="evil|`<script>",
+                            title="external",
+                            severity=RiskLevel.HIGH,
+                            category="security",
+                            path="app.py",
+                            line=1,
+                            message="matched",
+                        )
+                    ],
+                ),
+                verdict=Verdict(decision=Decision.AVOID, confidence=Confidence.MEDIUM),
+            )
+        ],
+    )
+
+    markdown = render_markdown(report)
+
+    assert "evil\\|" in markdown

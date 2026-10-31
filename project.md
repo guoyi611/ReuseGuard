@@ -30,7 +30,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.3.0）
+## 4. 当前状态（v0.4.0）
 
 已实现：
 
@@ -39,9 +39,11 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 信誉过滤：OpenSSF Scorecard 公共服务
 - 快照：`codeload.github.com` tarball，安全解包，无 `git clone`
 - 静态扫描：内置规则集，带误报抑制和覆盖上限
+- 外部扫描器：Semgrep 适配器（本地规则、JSON → 统一 `Finding`、降级 / 错误边界）
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--config`、`--sandbox`、`demo`、`--fail-on`、`--keep-workdir`
+- CLI：`check`、`--idea`、`--config`、`--semgrep-config`、`--sandbox`、`demo`、
+  `--fail-on`、`--keep-workdir`
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
@@ -50,7 +52,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 未实现：
 
 - 在沙箱内执行仓库行为（安装、导入、运行测试）
-- 外部扫描器（Semgrep / OSV / gitleaks）
+- OSV（lockfile）与 gitleaks（secret）适配器
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
 
 ## 5. 架构
@@ -67,7 +69,9 @@ src/reuseguard/
 │   ├── github.py       # GitHub REST：元数据 + search
 │   ├── scorecard.py    # OpenSSF Scorecard API
 │   ├── snapshot.py     # codeload 下载 + 安全解包
-│   ├── scanner.py      # 内置静态规则
+│   ├── scanner.py      # 内置静态规则 + 公共抑制策略
+│   ├── process.py      # 通用 argv 子进程边界（shell=False + 超时）
+│   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
 │   └── sandbox.py      # Docker 检测 + 加固命令 + 隔离探测
 └── stages/
     ├── recall.py       # 查询构造、相似度、召回
@@ -279,6 +283,50 @@ scan risk low/none:
 结论层只追加 caveat，不会因为探测通过而升级为 USE，也不会因为探测失败而把仓库
 判为恶意。报告明确写“一次运行、不代表后续版本、不是安全证明”。
 
+### 7.8 外部扫描器：Semgrep（M5 第一步）
+
+`--semgrep-config PATH` 开启。`PATH` 必须是本地文件或目录，否则 CLI 直接报错。
+
+调用方式（`shell=False`，argv 列表）：
+
+```text
+semgrep scan --json --quiet --metrics=off --disable-version-check
+  --no-git-ignore --config <PATH> --timeout 30
+  --max-target-bytes <max_file_bytes> --max-memory 1024 --jobs 1 <root>
+```
+
+- **禁止 `--config auto`**：不隐式联网、不拉远程规则。
+- `--metrics=off` / `--disable-version-check`：关闭遥测和版本检查。
+- `--no-git-ignore`：仓库自己的 `.gitignore` 不能把文件藏起来；Semgrep 仍可能读取
+  仓库内 `.semgrepignore`，这是已知覆盖缺口。
+- `--jobs 1`：单进程，资源可预测。
+- 整体进程超时默认 300s，可用 `--semgrep-timeout` 调整（10–3600）。
+
+映射：
+
+| Semgrep | ReuseGuard |
+| --- | --- |
+| `ERROR` | high |
+| `WARNING` | medium |
+| `INFO` | low |
+| `metadata.severity = critical` | critical |
+| 其他 | low |
+
+`check_id` → `rule_id`，`path` 规范化到快照内相对路径（越界路径丢弃），
+`start.line` → `line`，`extra.message` / `extra.lines` → `message` / `evidence`。
+复用 `scanner.suppression_reason()`，docs/tests/examples 的命中仍标记 suppressed。
+
+覆盖完整性：
+
+- Semgrep `errors` 非空或 `paths.skipped` 非空 → `truncated=True`。
+- 命中数超过 `ScanLimits.max_findings` → 截断并标记。
+
+失败语义：
+
+- 找不到可执行文件 → `SemgrepUnavailable`，pipeline 降级到内置扫描器 + warning。
+- 配置缺失、非零退出、超时、JSON 非法 → `ScanReport(status=ERROR, scanner="semgrep")`，
+  **不静默降级**；结论为 INSPECT。
+
 ## 8. 安全模型
 
 被检查的仓库是不可信输入。安全边界：
@@ -291,17 +339,22 @@ scan risk low/none:
    固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂
    Docker socket，不用 `--privileged`，不自动 pull。挂载源拒绝文件系统根、home
    及其祖先、含逗号 / 换行的路径。
-6. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
-   `api.securityscorecards.dev`。不调用 LLM，不上传内容。
-7. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
+6. **外部扫描器**：Semgrep 只接受本地规则路径，禁止 `--config auto`，关闭
+   metrics / 版本检查；argv 列表、`shell=False`、显式超时；输出按不可信 JSON 解析，
+   越界路径丢弃。
+7. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
+   `api.securityscorecards.dev`。不调用 LLM，不上传内容。Semgrep 不会因扫描而联网
+   （本地规则 + `--metrics=off` + `--disable-version-check`）。
+8. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
    不写入报告、不打印、不落盘。
-8. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
-   `|` 会转义。容器探测输出同样按不可信数据处理。
+9. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
+   `|` 会转义。容器探测输出和外部扫描器输出同样按不可信数据处理。
 
 剩余风险：
 
 - tarball 下载和解压仍消耗磁盘 / 带宽；已有大小上限，但不是硬隔离。
 - 静态扫描存在漏报；沙箱当前只验证隔离，不观察仓库行为。
+- Semgrep 的覆盖范围取决于用户提供的规则集；`.semgrepignore` 仍可能缩小扫描范围。
 - 沙箱依赖本机 Docker daemon、容器运行时和本地镜像；这些仍是信任边界。
 - 私有仓库的 tarball 访问需要 token；当前实现不向 codeload 发送 token，
   因此私有仓库可能下载失败（会降级为 scan error → INSPECT）。
@@ -323,6 +376,9 @@ scan risk low/none:
 - 沙箱测试全部使用 `FakeCommandRunner` / fake detector：不启动 Docker、不执行
   不可信代码。覆盖检测失败、超时清理、非零退出、坏 JSON、`containment_ok` 失败、
   触发策略（off / auto / all）、不可用降级和 CLI 参数校验。
+- Semgrep 测试全部使用 `FakeCommandRunner`，CI 不安装 Semgrep。覆盖严重度映射、
+  抑制、越界路径、坏 JSON、超时、非零退出、缺可执行文件降级、缺配置、截断、
+  去重、参数加固和 CLI 校验。
 - 结论测试覆盖 7.5 的每条分支。
 - CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码、`--sandbox` 参数组合。
 - 真实网络和真实 Docker 只用于手动验收，不进入默认 CI。
@@ -336,6 +392,7 @@ reuseguard check tconbeer/harlequin --limit 0
 reuseguard check --idea "fast HTTP client with retries" --language Python --limit 3
 reuseguard check psf/requests --config examples/reuseguard.yaml
 reuseguard check psf/requests --no-recall --sandbox all
+reuseguard check psf/requests --no-recall --semgrep-config rules/
 ```
 
 ## 10. 里程碑
@@ -357,9 +414,13 @@ reuseguard check psf/requests --no-recall --sandbox all
     - 报告“Sandbox”区块与 summary 列；结论只加 caveat，不升级也不判恶意
   - 待办：真实 Docker 手动冒烟验收；在沙箱内执行仓库行为（安装 / 导入 / 测试）
   - 边界：单次运行只代表当次容器配置，不是“无害证明”
-- **M5**：外部扫描器
-  - 统一 `Finding` schema
-  - Semgrep / OSV / gitleaks 适配器，失败可降级
+- **M5（进行中）**：外部扫描器
+  - 已完成：Semgrep 适配器
+    - `adapters/process.py`：共享的 argv / `shell=False` / 超时 runner
+    - `adapters/semgrep.py`：本地规则、JSON 解析、severity 映射、抑制、截断
+    - `--semgrep-config` / `--semgrep-timeout`；缺可执行文件才降级到内置
+    - 非零退出 / 坏 JSON / 超时 / 缺配置 → scan error，不静默降级
+  - 待办：OSV（lockfile）与 gitleaks（secret）适配器；统一 finding schema 扩展
 - **M6（已完成）**：YAML 策略
   - `--config PATH`
   - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob
@@ -382,6 +443,9 @@ reuseguard check psf/requests --no-recall --sandbox all
 | 沙箱触发 | `off` / `auto` / `all` 三态 | 默认零副作用；high/critical 与显式请求都能覆盖 |
 | 沙箱失败 | 只写 warning，不改变结论 | 隔离失败是环境证据，不是仓库恶意证据 |
 | 沙箱镜像 | 不自动 pull，`--pull=never` | 避免隐式联网和镜像供应链副作用 |
+| Semgrep 规则 | 只接受本地路径 | 避免 `--config auto` 隐式联网和规则供应链风险 |
+| Semgrep 缺可选依赖 | 降级内置 + warning | 外部工具不可用不应中断整次评估 |
+| Semgrep 运行失败 | scan error，不静默降级 | 用户显式要求 Semgrep 时，静默换扫描器会掩盖覆盖缺口 |
 
 ## 12. 开放问题
 
@@ -395,8 +459,10 @@ reuseguard check psf/requests --no-recall --sandbox all
    资源上限、超时杀容器；不挂 docker socket。gVisor / runsc 仍待评估。
 6. **沙箱行为探测**：是否/如何执行安装脚本、导入模块或运行测试，同时保证
    “单次运行”不被误读为安全证明？需要固定的探针协议和输出上限。
-6. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
-7. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
+7. **外部扫描器覆盖**：Semgrep 的 `.semgrepignore` 仍可能让仓库缩小扫描范围；
+   是否需要在隔离副本中删除该文件，或直接传入显式文件列表？
+8. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
+9. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
 
 ## 13. 如何扩展
 
@@ -421,8 +487,16 @@ PatternRule(
 
 ### 替换扫描器
 
-`Pipeline` 接受 `scan_fn(root, *, limits) -> ScanReport`。实现一个适配器把 Semgrep
-输出转成 `Finding` / `ScanReport` 即可，不需要改 verdict 或 report。
+`Pipeline` 接受 `scan_fn(root, *, limits) -> ScanReport`。Semgrep 适配器就是例子：
+`SemgrepScanner.scan(...)` 复用 `ScanLimits` 和 `scanner.suppression_reason()`，
+把结果转成统一 `Finding` / `ScanReport`，不需要改 verdict 或 report。
+
+新增外部扫描器时：
+
+1. 用 `adapters/process.py` 的 runner（argv 列表、`shell=False`、显式超时）。
+2. 把工具输出当作不可信数据，限制条数、路径必须落在快照内。
+3. 区分“工具不存在”（可降级）和“工具运行失败”（scan error，不静默降级）。
+4. 复用 `suppression_reason()`，并让截断 / 错误进入 `ScanReport.truncated`。
 
 ### 增加召回来源
 

@@ -19,15 +19,12 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import time
 import uuid
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from ..models import SandboxReport, SandboxStatus
+from .process import CommandRunner, run_command
 
 DEFAULT_IMAGE = "python:3.11-slim"
 DEFAULT_MEMORY_MB = 256
@@ -52,24 +49,6 @@ class SandboxError(Exception):
 
 class SandboxConfigError(SandboxError):
     """The requested mount source or limits are not acceptable."""
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    """The result of one local command invocation."""
-
-    argv: tuple[str, ...]
-    returncode: int | None = None
-    stdout: str = ""
-    stderr: str = ""
-    timed_out: bool = False
-    duration_seconds: float = 0.0
-
-
-class CommandRunner(Protocol):
-    """Callable that executes an argv list and never uses a shell."""
-
-    def __call__(self, argv: Sequence[str], *, timeout: float) -> CommandResult: ...
 
 
 @dataclass(frozen=True)
@@ -121,52 +100,6 @@ class SandboxPlan:
     def command_preview(self) -> str:
         """A human-readable rendering that never goes through a shell."""
         return " ".join(_quote(part) for part in self.argv)
-
-
-def run_command(argv: Sequence[str], *, timeout: float) -> CommandResult:
-    """Run a local command without a shell, capturing bounded output."""
-    started = time.monotonic()
-    try:
-        completed = subprocess.run(
-            list(argv),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except FileNotFoundError:
-        return CommandResult(
-            argv=tuple(argv),
-            returncode=None,
-            stderr="executable not found",
-            duration_seconds=round(time.monotonic() - started, 2),
-        )
-    except subprocess.TimeoutExpired as exc:
-        return CommandResult(
-            argv=tuple(argv),
-            returncode=None,
-            stdout=_as_text(exc.stdout),
-            stderr=_as_text(exc.stderr),
-            timed_out=True,
-            duration_seconds=round(time.monotonic() - started, 2),
-        )
-    except OSError as exc:
-        return CommandResult(
-            argv=tuple(argv),
-            returncode=None,
-            stderr=f"could not start command: {exc}",
-            duration_seconds=round(time.monotonic() - started, 2),
-        )
-
-    return CommandResult(
-        argv=tuple(argv),
-        returncode=completed.returncode,
-        stdout=completed.stdout or "",
-        stderr=completed.stderr or "",
-        duration_seconds=round(time.monotonic() - started, 2),
-    )
 
 
 def detect_docker(
@@ -413,14 +346,6 @@ def _tail(value: str, limit: int = _MAX_CAPTURE_CHARS) -> str | None:
     if not text:
         return None
     return text[-limit:]
-
-
-def _as_text(value: bytes | str | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
 
 
 def _quote(value: str) -> str:

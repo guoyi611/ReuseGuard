@@ -206,7 +206,10 @@ def _render_assessment(index: int, assessment: Assessment) -> list[str]:
             f"{len(scan.suppressed_findings)} suppressed."
         )
         if scan.truncated:
-            lines.append("**Coverage is incomplete:** the scan hit a file or size limit.")
+            lines.append(
+                "**Coverage is incomplete:** the scanner hit a file or size limit, "
+                "or reported errors."
+            )
         if scan.files_skipped:
             lines.append(
                 f"{scan.files_skipped:,} file(s) were skipped (binary, generated, or over the "
@@ -245,7 +248,8 @@ def _render_assessment(index: int, assessment: Assessment) -> list[str]:
             for finding in suppressed[:_MAX_SUPPRESSED_IN_REPORT]:
                 location = _code(_location(finding), 160)
                 lines.append(
-                    f"| {finding.severity.value.upper()} | `{finding.rule_id}` | "
+                    f"| {finding.severity.value.upper()} | "
+                    f"`{_code(finding.rule_id, 160)}` | "
                     f"`{location}` | {_md(finding.suppression_reason or 'suppressed', 80)} |"
                 )
             if len(suppressed) > _MAX_SUPPRESSED_IN_REPORT:
@@ -405,7 +409,7 @@ def _finding_row(finding: Finding) -> str:
     if finding.evidence:
         detail += f" — `{_code(finding.evidence, 160)}`"
     return (
-        f"| {finding.severity.value.upper()} | `{finding.rule_id}` | "
+        f"| {finding.severity.value.upper()} | `{_code(finding.rule_id, 160)}` | "
         f"`{_code(_location(finding), 160)}` | {detail} |"
     )
 
@@ -426,6 +430,8 @@ def _render_limitations() -> list[str]:
         "differently.",
         "- Sandbox verification is opt-in, covers a single container run, and currently checks "
         "container containment only; it does not execute repository code.",
+        "- When an external scanner is enabled, its coverage depends on the supplied rule set; "
+        "rules that are absent cannot produce findings.",
     ]
 
 
@@ -465,6 +471,12 @@ def _render_run_details(report: Report) -> list[str]:
                 f"- Sandbox: mode `{_code(sandbox_mode, 20)}`, image "
                 f"`{_code(image, 120)}`, timeout "
                 f"{report.settings.get('sandbox_timeout', '?')}s"
+            )
+        semgrep_config = report.settings.get("semgrep_config")
+        if semgrep_config:
+            lines.append(
+                f"- Scanner: `semgrep`, config `{_code(semgrep_config, 240)}`, "
+                f"timeout {report.settings.get('semgrep_timeout', '?')}s"
             )
     if report.recall_queries:
         lines.append("- Search queries:")

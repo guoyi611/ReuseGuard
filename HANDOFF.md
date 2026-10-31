@@ -3,9 +3,8 @@
 > 最后更新：2026-10-31
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
-> 当前版本：`0.3.0`
-> 基线提交：`f39c84b feat: add opt-in sandbox containment checks`（M4 第 2 步；
-> 第 1 步为 `385667d`）
+> 当前版本：`0.4.0`
+> 基线提交：`git log --oneline -1`（M5 第一步 Semgrep；M4 基线为 `f39c84b`）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -35,11 +34,11 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M2 | 完成 | JSON、`--fail-on`、误报抑制、离线 demo、测试、CI、打包 |
 | M3 | 完成 | `--idea` 自然语言输入、关键词召回与排序、`Report.seed=None` |
 | M4 | **进行中（骨架完成）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；**不在沙箱内执行仓库代码**，真实 Docker 冒烟待做 |
-| M5 | **未开始** | Semgrep / OSV / gitleaks 外部扫描器适配 |
+| M5 | **进行中** | Semgrep 适配器完成（本地规则、JSON 解析、统一 Finding、降级/错误边界）；OSV、gitleaks 待做 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**195 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script（0.3.0 待重建验证）。
+当前测试：**237 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script（0.4.0 待重建验证）。
 
 ## 3. 代码地图
 
@@ -55,7 +54,9 @@ src/reuseguard/
 │   ├── github.py       # GitHub REST 元数据 + search
 │   ├── scorecard.py    # OpenSSF Scorecard API
 │   ├── snapshot.py     # codeload 下载 + 安全解包
-│   ├── scanner.py      # 内置规则、KNOWN_RULE_IDS、策略参数
+│   ├── scanner.py      # 内置规则、KNOWN_RULE_IDS、suppression_reason()
+│   ├── process.py      # 共享 argv 子进程边界（shell=False + 超时）
+│   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
 │   └── sandbox.py      # Docker 检测 + 加固 docker run + 隔离探测
 └── stages/
     ├── recall.py       # seed 召回 + idea 召回 + 相似度
@@ -78,6 +79,7 @@ tests/
 ├── test_reputation.py
 ├── test_sandbox.py
 ├── test_scanner.py
+├── test_semgrep.py
 ├── test_snapshot.py
 └── test_verdict.py
 ```
@@ -143,6 +145,43 @@ tests/
 诚实边界：当前探测验证的是**容器隔离配置**，不是仓库行为。`containment_ok=True`
 不等于仓库安全；报告与文档必须这么写。
 
+## 4.2 本会话 M5 第一步：Semgrep 适配器
+
+新增：
+
+- `src/reuseguard/adapters/process.py`：从 sandbox 抽出的共享 runner
+  （`CommandResult` / `CommandRunner` / `run_command`）。sandbox 现在从这里导入。
+- `src/reuseguard/adapters/semgrep.py`：
+  - `SemgrepOptions`（本地 config、rule timeout、process timeout、max memory）
+  - `SemgrepScanner.scan(root, limits=..., disabled_rules=..., severity_overrides=...,
+    suppress_globs=...) -> ScanReport`
+  - `SemgrepUnavailable`：只有“可执行文件不存在”才抛，pipeline 降级到内置扫描器
+  - 固定 argv：`semgrep scan --json --quiet --metrics=off --disable-version-check
+    --no-git-ignore --config <PATH> --timeout 30 --max-target-bytes N --max-memory N
+    --jobs 1 <root>`；**禁止 `--config auto`**
+  - severity：ERROR→high、WARNING→medium、INFO→low、metadata critical→critical
+  - 路径必须落在快照内，越界丢弃；复用 `scanner.suppression_reason()`
+  - `errors` / `skipped` 非空或命中数超限 → `truncated=True`
+  - 非零退出、超时、坏 JSON、缺 config → `ScanReport(status=ERROR, scanner="semgrep")`，
+    **不静默降级**
+- CLI：`--semgrep-config PATH`、`--semgrep-timeout SECONDS`（10–3600）
+  - config 必须存在；不能与 `--no-scan` 同用
+  - `--semgrep-timeout` 不能单独使用
+  - semgrep 不在 PATH → warning，实际由 pipeline 降级
+- Pipeline：`Settings.semgrep_config` 有值时优先 Semgrep；只有 `SemgrepUnavailable`
+  回退内置并写 warning；其他错误直接 scan error。
+- Report：run details 显示 `Scanner: semgrep`、config、timeout；limitations 增加
+  “外部规则集决定覆盖范围”。
+- 版本：0.4.0。
+- 测试：`tests/test_semgrep.py` 31 个 + pipeline / CLI 用例，全部 `FakeCommandRunner`；
+  CI 不安装 Semgrep。
+
+诚实边界：
+
+- 扫描的是本地规则集；没写的规则不会产生 finding，不能把“0 findings”当安全。
+- Semgrep 仍可能读取仓库内 `.semgrepignore`，可能缩小覆盖范围（已记入开放问题）。
+- 没有在 CI 里跑真实 Semgrep；只在 fake runner 层验证命令与解析。
+
 ## 5. 如何运行
 
 ```powershell
@@ -156,6 +195,8 @@ reuseguard check --idea "a fast HTTP client with retries" --language Python --li
 reuseguard check psf/requests --config examples/reuseguard.yaml
 reuseguard check psf/requests --no-recall --sandbox all
 reuseguard check psf/requests --no-recall --sandbox auto --sandbox-timeout 30
+reuseguard check psf/requests --no-recall --semgrep-config rules/semgrep.yaml
+reuseguard check psf/requests --no-recall --semgrep-config rules/ --semgrep-timeout 120
 ```
 
 需要 token 时：
@@ -255,17 +296,41 @@ python -m build
 “默认不接触 Docker + 不执行仓库代码”；下一步若要做行为探测，必须先设计固定探针
 协议、输出上限和“单次运行不等于安全”的措辞，再写代码。
 
-## 9. 下一步建议：M5 外部扫描器
+## 9. 下一步建议：M5 剩余扫描器
 
-优先做 **Semgrep 适配器**，因为它的 JSON 输出稳定、只解析不执行：
+Semgrep 已完成（见 4.2）。接下来按难度：
 
-- `scan_fn` 已经是可注入的；实现 `SemgrepScanner` 返回统一 `ScanReport`
-- 通过 `subprocess.run([...], shell=False)` 调用，显式超时
-- 规则来源必须是用户提供的 `--semgrep-config PATH` 或仓库内固定配置，**不要**
-  默认 `--config auto`（会联网拉规则）
-- 找不到 semgrep 时降级为内置扫描器并写 warning
-- 用 fake executable / fake subprocess 写测试，CI 不安装 semgrep
-- 后续再加 OSV（lockfile）和 gitleaks（secret），统一 `Finding` schema
+### 9.1 gitleaks（建议先做）
+
+- 本地可执行文件，JSON 输出稳定；`gitleaks detect --no-git --source <root>
+  --report-format json --report-path -`。
+- 重点：`--no-git`（快照没有 `.git`）、关闭远端配置、明确超时。
+- 解析 `leaks` 数组：`RuleID`、`File`、`StartLine`、`Description`、`Match`、
+  `Secret`。**不要把 `Secret` 原文写进报告**，只保留脱敏后的证据。
+- severity：gitleaks 没有 severity，按规则 ID 映射（私钥/token → high，其他 → medium）。
+- 可执行文件缺失 → 降级内置 + warning；运行失败/坏 JSON → scan error。
+- 全部用 fake runner 测试，CI 不安装 gitleaks。
+
+### 9.2 OSV（lockfile）
+
+- 两种实现路径，需先定：
+  1. `osv-scanner --lockfile <path> --format json`（外部二进制，和 Semgrep/gitleaks 一致）
+  2. 直接调 `https://api.osv.dev/v1/querybatch`（需要网络、httpx、可注入 client）
+- 不管哪条路，都需要先识别 lockfile：`requirements.txt`、`poetry.lock`、
+  `package-lock.json`、`go.mod`、`Cargo.lock`、`Gemfile.lock` 等。
+- 网络路径必须考虑离线测试：用 fake HTTP client，不访问真实 OSV。
+- 漏洞 finding 的 severity 来自 OSV `database_specific.severity` 或 CVSS；
+  缺失时保守为 medium，不要默认 high。
+- 统一 `Finding`：`rule_id` 用 OSV ID（如 `GHSA-...` / `CVE-...`），
+  `category="dependency"`，`path=lockfile`，`line` 可空。
+
+### 9.3 通用约束（沿用 Semgrep）
+
+- 场景：`--gitleaks` / `--osv` CLI 开关，默认关闭；`--no-scan` 时禁用。
+- 组合多个扫描器时，`ScanReport` 需要合并 findings、取最高 risk、保留 scanner 列表；
+  这可能要扩展 `ScanReport.scanner` 为可读字符串（如 `semgrep+gitleaks`）。
+- 不要把“扫描器没报”写成安全；报告 limitations 必须写覆盖范围。
+- 每个扫描器单独 commit，补测试 + 跑 pytest/ruff + 更新三份文档。
 
 ## 10. 新对话提示词
 
@@ -279,15 +344,20 @@ python -m build
 - git log --oneline -5
 - python -m pytest
 - ruff check src tests
-确认基线（main，v0.3.0，195 个测试通过）后再动手。
+确认基线（main，v0.4.0，237 个测试通过）后再动手。
 
-已完成的里程碑：M1、M2、M3（--idea 自然语言输入）、M6（YAML 策略）、
-M4 安全骨架（默认关闭的容器隔离探测，含 CLI / 报告 / fake runner 测试）。
-未完成：M4 的行为探测（在沙箱内执行安装/导入/测试）、M5（Semgrep/OSV/gitleaks 适配）。
+已完成的里程碑：M1、M2、M3（--idea）、M4 安全骨架（默认关闭的容器隔离探测）、
+M5 第一步（Semgrep 适配器：本地规则、统一 Finding、降级/错误边界）、M6（YAML 策略）。
+未完成：M5 剩余（gitleaks、OSV）、M4 行为探测（在沙箱内执行安装/导入/测试）、
+真实 Docker 冒烟验收。
 
-请按 HANDOFF.md 第 8、9 节的顺序继续。优先做 M5 的 Semgrep 适配器（只解析不执行），
-或先补 M4 的真实 Docker 手动冒烟验收与镜像 digest 校验。不要把被检查代码在宿主机上执行，
-也不要在沙箱里执行仓库代码，除非先完成独立的探针协议与证据边界设计。
+请按 HANDOFF.md 第 9 节的顺序继续：
+1. 先做 gitleaks 适配器（--no-git、JSON 解析、Secret 脱敏、fake runner 测试）。
+2. 再做 OSV lockfile 适配器（先决定 osv-scanner 二进制还是 HTTP API）。
+3. 每个扫描器单独 commit，补测试 + pytest + ruff + 更新三份文档 + push。
+
+不要把被检查代码在宿主机上执行，也不要在沙箱里执行仓库代码，除非先完成独立的
+探针协议与证据边界设计。不要用 `--config auto` 或任何会隐式联网拉规则的路径。
 
 每完成一个可验证的小步：
 - 补测试

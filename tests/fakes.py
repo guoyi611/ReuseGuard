@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from reuseguard.adapters.sandbox import CommandResult
+from reuseguard.adapters.process import CommandResult
 from reuseguard.adapters.scorecard import ScorecardNotFound
 from reuseguard.adapters.snapshot import ExtractionStats, Snapshot
 from reuseguard.models import RepoMeta

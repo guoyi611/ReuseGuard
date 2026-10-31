@@ -211,3 +211,90 @@ def test_sandbox_settings_are_forwarded_to_the_pipeline(
     assert settings.sandbox_mode == "auto"
     assert settings.sandbox_image == "python:3.12-slim"
     assert settings.sandbox_timeout == 30.0
+
+
+def test_semgrep_config_must_exist(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--semgrep-config", str(tmp_path / "missing.yaml")])
+
+    assert code == 2
+    assert "semgrep config path does not exist" in capsys.readouterr().err
+
+
+def test_semgrep_timeout_requires_config(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--semgrep-timeout", "60"])
+
+    assert code == 2
+    assert "requires --semgrep-config" in capsys.readouterr().err
+
+
+def test_semgrep_requires_static_scanning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "rules.yaml"
+    config.write_text("rules: []\n", encoding="utf-8")
+
+    code = cli.main(["check", "acme/seed", "--semgrep-config", str(config), "--no-scan"])
+
+    assert code == 2
+    assert "requires static scanning" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["5", "4000"])
+def test_semgrep_timeout_must_be_in_range(tmp_path: Path, value: str) -> None:
+    config = tmp_path / "rules.yaml"
+    config.write_text("rules: []\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "check",
+                "acme/seed",
+                "--semgrep-config",
+                str(config),
+                "--semgrep-timeout",
+                value,
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_semgrep_settings_are_forwarded_to_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "semgrep.md"
+    config = tmp_path / "rules.yaml"
+    config.write_text("rules: []\n", encoding="utf-8")
+    report = build_demo_report()
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return report
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--semgrep-config",
+            str(config),
+            "--semgrep-timeout",
+            "120",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.semgrep_config == str(config)
+    assert settings.semgrep_timeout == 120.0

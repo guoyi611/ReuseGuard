@@ -33,6 +33,12 @@ from .adapters.sandbox import (
 )
 from .adapters.scanner import ScanLimits, scan_directory
 from .adapters.scorecard import ScorecardClient
+from .adapters.semgrep import (
+    SemgrepError,
+    SemgrepOptions,
+    SemgrepScanner,
+    SemgrepUnavailable,
+)
 from .adapters.snapshot import Snapshot, SnapshotError, SnapshotTooLarge, fetch_snapshot
 from .config import Settings
 from .models import (
@@ -70,6 +76,7 @@ class Pipeline:
         snapshot_fn: Callable[..., Snapshot] = fetch_snapshot,
         sandbox_runner: CommandRunner = run_command,
         sandbox_detect: Callable[..., DockerStatus] = detect_docker,
+        semgrep_runner: CommandRunner = run_command,
     ) -> None:
         self.settings = settings
         self.github = github
@@ -79,6 +86,7 @@ class Pipeline:
         self._snapshot_fn = snapshot_fn
         self._sandbox_runner = sandbox_runner
         self._sandbox_detect = sandbox_detect
+        self._semgrep_runner = semgrep_runner
 
     def run(self, seed_ref: RepoRef) -> Report:
         started = time.monotonic()
@@ -297,6 +305,38 @@ class Pipeline:
             max_file_bytes=self.settings.max_file_kb * 1024,
             max_total_bytes=self.settings.max_scan_mb * 1024 * 1024,
         )
+
+        if self.settings.semgrep_config:
+            try:
+                scanner = SemgrepScanner(
+                    SemgrepOptions(
+                        config=Path(self.settings.semgrep_config),
+                        process_timeout=self.settings.semgrep_timeout,
+                        rule_timeout=self.settings.semgrep_rule_timeout,
+                    ),
+                    runner=self._semgrep_runner,
+                )
+                semgrep_scan = scanner.scan(
+                    snapshot.root,
+                    limits=limits,
+                    disabled_rules=self.settings.disabled_rules,
+                    severity_overrides=self.settings.severity_overrides,
+                    suppress_globs=self.settings.suppress_paths,
+                )
+                return semgrep_scan, snapshot.root
+            except SemgrepUnavailable as exc:
+                logger.warning("  semgrep unavailable: %s", exc)
+                warnings.append(
+                    f"{repo.full_name}: semgrep is unavailable ({exc}); "
+                    "used the built-in scanner instead."
+                )
+            except SemgrepError as exc:
+                logger.warning("  semgrep failed: %s", exc)
+                return (
+                    ScanReport(status=ScanStatus.ERROR, scanner="semgrep", error=str(exc)),
+                    snapshot.root,
+                )
+
         try:
             scan = self._scan_fn(
                 snapshot.root,

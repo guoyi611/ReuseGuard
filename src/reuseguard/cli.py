@@ -100,6 +100,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable snapshot download and static scanning",
     )
     check.add_argument(
+        "--semgrep-config",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "scan with Semgrep using a local rules file or directory; "
+            "neither Semgrep's remote config nor --config auto is ever used"
+        ),
+    )
+    check.add_argument(
+        "--semgrep-timeout",
+        type=_semgrep_timeout,
+        default=None,
+        metavar="SECONDS",
+        help="overall Semgrep process limit, 10-3600 (default: 300)",
+    )
+    check.add_argument(
         "--sandbox",
         nargs="?",
         const="all",
@@ -278,6 +294,30 @@ def _run_check(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    semgrep_timeout = _pick(args.semgrep_timeout, None, 300.0)
+    if args.semgrep_config is None and args.semgrep_timeout is not None:
+        print("error: --semgrep-timeout requires --semgrep-config", file=sys.stderr)
+        return 2
+    if args.semgrep_config is not None:
+        if not enable_scan:
+            print(
+                "error: --semgrep-config requires static scanning; remove --no-scan",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.semgrep_config.exists():
+            print(
+                f"error: semgrep config path does not exist: {args.semgrep_config}",
+                file=sys.stderr,
+            )
+            return 2
+        if not shutil.which("semgrep"):
+            logger.warning(
+                "Semgrep was not found on PATH; ReuseGuard will fall back to the "
+                "built-in scanner and record a warning."
+            )
+
     try:
         sandbox_limits = SandboxLimits(
             image=args.sandbox_image or DEFAULT_IMAGE,
@@ -327,6 +367,8 @@ def _run_check(args: argparse.Namespace) -> int:
         enable_recall=enable_recall,
         enable_scorecard=enable_scorecard,
         enable_scan=enable_scan,
+        semgrep_config=str(args.semgrep_config) if args.semgrep_config else None,
+        semgrep_timeout=semgrep_timeout,
         sandbox_mode=sandbox_mode,
         sandbox_image=sandbox_limits.image,
         sandbox_timeout=sandbox_limits.timeout_seconds,
@@ -467,4 +509,11 @@ def _sandbox_timeout(value: str) -> float:
     parsed = _positive_float(value)
     if not 1.0 <= parsed <= 600.0:
         raise argparse.ArgumentTypeError("sandbox timeout must be between 1 and 600 seconds")
+    return parsed
+
+
+def _semgrep_timeout(value: str) -> float:
+    parsed = _positive_float(value)
+    if not 10.0 <= parsed <= 3600.0:
+        raise argparse.ArgumentTypeError("semgrep timeout must be between 10 and 3600 seconds")
     return parsed

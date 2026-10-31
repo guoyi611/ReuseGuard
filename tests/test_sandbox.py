@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
+from reuseguard.adapters.process import CommandResult
 from reuseguard.adapters.sandbox import (
     DEFAULT_IMAGE,
     DEFAULT_MEMORY_MB,
     DEFAULT_PIDS_LIMIT,
     DEFAULT_TIMEOUT_SECONDS,
-    CommandResult,
     SandboxConfigError,
     SandboxLimits,
     build_plan,

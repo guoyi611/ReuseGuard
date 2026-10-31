@@ -785,6 +785,15 @@ def _is_vscode_tasks(relative: str) -> bool:
     return len(parts) >= 2 and parts[-2] == ".vscode" and parts[-1] == "tasks.json"
 
 
+def suppression_reason(relative: str, suppress_globs: tuple[str, ...] = ()) -> str | None:
+    """Public wrapper for the built-in false-positive suppression policy.
+
+    External scanners use this so a finding in ``docs/`` or ``tests/`` is
+    treated the same way as a built-in finding.
+    """
+    return _suppression_reason(relative, suppress_globs)
+
+
 def _suppression_reason(relative: str, suppress_globs: tuple[str, ...] = ()) -> str | None:
     for pattern in suppress_globs:
         if fnmatch.fnmatch(relative, pattern):

@@ -31,18 +31,19 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.3.0 已经可用：
+v0.4.0 已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
 - 用 OpenSSF Scorecard 的公开数据做信誉过滤
 - 下载默认分支的只读快照，做静态风险扫描
+- 可选使用**本地** Semgrep 规则集做外部静态扫描（`--semgrep-config`）
 - 可选地在容器里验证隔离配置（`--sandbox auto` / `--sandbox all`），默认关闭
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：在沙箱内执行仓库行为（安装、导入、运行测试）、Semgrep/OSV/gitleaks
-等外部扫描器接入。沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。
+尚未实现：OSV / gitleaks 适配、在沙箱内执行仓库行为（安装、导入、运行测试）。
+沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。
 
 ## 工作流
 
@@ -199,6 +200,28 @@ reuseguard check psf/requests --sandbox auto `
 - 单文件默认上限 1 MB，单仓库默认上限 2000 个文件 / 20 MB；触发上限会在报告中标记“覆盖不完整”。
 - 规则命中会附带文件、行号、消息和证据，方便人工判断。
 
+### 外部扫描器：Semgrep
+
+内置规则保持轻量，但团队通常已有自己的 Semgrep 规则。用 `--semgrep-config PATH` 开启：
+
+```powershell
+reuseguard check psf/requests --semgrep-config rules/semgrep.yaml
+reuseguard check psf/requests --semgrep-config rules/ --semgrep-timeout 120
+```
+
+- 规则来源必须是**本地文件或目录**；ReuseGuard 从不使用 `--config auto`，也不隐式联网拉规则。
+- 调用参数固定包含 `--json`、`--metrics=off`、`--disable-version-check`、`--no-git-ignore`、`--jobs 1`，并通过 argv 列表 + `shell=False` 执行。
+- `--no-git-ignore` 防止仓库自己的 `.gitignore` 把文件藏起来。注意 Semgrep 可能仍读取仓库内的 `.semgrepignore`，这是当前已知覆盖缺口。
+- 结果映射到统一的 `Finding`（`check_id`、路径、行号、severity、证据），并复用 docs/tests/examples 的抑制策略。
+- Semgrep 的 `ERROR` → high、`WARNING` → medium、`INFO` → low；`metadata.severity: critical` → critical。
+- Semgrep 报告解析错误或跳过文件时，扫描标记为“覆盖不完整”，结论不会当成干净。
+- 找不到 `semgrep` 可执行文件时降级到内置扫描器并写 warning；Semgrep 运行失败或输出非法时记为 scan error，**不会静默降级**。
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `--semgrep-config PATH` | — | 本地规则文件或目录；开启 Semgrep 扫描 |
+| `--semgrep-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
+
 ## 沙箱隔离检查（可选）
 
 v0.3 增加了一个**默认关闭**的容器隔离检查。它验证 ReuseGuard 的隔离配置是否按预期生效，**不在沙箱里执行仓库代码**：
@@ -236,6 +259,7 @@ ReuseGuard 自身也按“被检查的代码不可信”来设计：
 - **安全解包。** 拒绝绝对路径、`..`、Windows 盘符 / 保留名、符号链接、硬链接和设备节点；限制文件数、单文件大小和总解压大小。
 - **不跟随符号链接。** 扫描器只读普通文件，二进制文件跳过。
 - **沙箱是加固后的旁路。** 只有在显式开启时才调用 Docker；命令用 argv 列表拼装（`shell=False`），固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂 Docker socket，不用 `--privileged`，不自动拉镜像。
+- **外部扫描器只读本地规则。** Semgrep 用 `--semgrep-config PATH` 的本地规则，禁止 `--config auto`；关闭 metrics、版本检查和 gitignore 绕过，不执行仓库代码。
 - **只访问 GitHub 和 OpenSSF Scorecard。** 不把仓库内容上传给 LLM 或其他第三方。
 - **token 不落盘。** 只从环境变量或 `gh auth token` 读取，不写入报告，不打印。
 - **不在报告里渲染原始 HTML。** 仓库描述等用户可控文本会做 HTML 转义。
@@ -295,6 +319,8 @@ reuseguard --version
 | `--no-recall` | off | 只评估种子仓库（仅 URL 模式） |
 | `--no-scorecard` | off | 关闭信誉过滤（结论会变成 INSPECT） |
 | `--no-scan` | off | 关闭快照下载和静态扫描 |
+| `--semgrep-config PATH` | — | 用本地 Semgrep 规则文件/目录扫描；绝不使用 `--config auto` |
+| `--semgrep-timeout SECONDS` | 300 | Semgrep 整体进程上限（10–3600） |
 | `--sandbox [MODE]` | off | 容器隔离检查：`auto` 只跑 high/critical，`all` 或裸参数跑全部，`off` 关闭 |
 | `--sandbox-image IMAGE` | python:3.11-slim | 沙箱镜像；必须已在本地，不会自动 pull |
 | `--sandbox-timeout SECONDS` | 20 | 单次沙箱运行上限（1–600），超时杀容器 |
@@ -322,6 +348,7 @@ reuseguard --version
 - 结果是运行时刻的快照；之后的新 commit 可能行为不同。
 - v0.3 的沙箱只验证容器隔离配置，不执行仓库代码；它不能替代行为分析或人工审计。
 - 沙箱需要本机 Docker 守护进程和预拉取的镜像；不可用时只记 warning，不改变结论。
+- Semgrep 的覆盖范围完全取决于你提供的规则集；ReuseGuard 不内置或联网获取规则。
 
 ## 开发
 
@@ -342,7 +369,8 @@ ruff format --check src tests
 - **M4（进行中）**：隔离动态验证；已完成安全骨架与 CLI 接入（Docker 检测、
   加固容器命令、隔离探测、`--sandbox` 触发、报告区块、fake runner 测试），
   待做“在沙箱内执行仓库行为”
-- **M5**：可插拔外部扫描器（Semgrep、OSV、gitleaks），统一 finding schema
+- **M5（进行中）**：可插拔外部扫描器。已完成 Semgrep 适配器（本地规则、JSON
+  解析、统一 `Finding`、降级与错误边界）；OSV（lockfile）和 gitleaks（secret）待做
 - **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
 
 设计取舍和阶段规则见 [project.md](project.md)。

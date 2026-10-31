@@ -167,6 +167,7 @@ class Similarity:
 
     total: float
     topics: float = 0.0
+    keywords: float = 0.0
     language: float = 0.0
     recency: float = 0.0
     popularity: float = 0.0
@@ -295,7 +296,7 @@ class Report:
 
     tool_version: str
     generated_at: datetime
-    seed: RepoMeta
+    seed: RepoMeta | None
     assessments: list[Assessment]
     recall_queries: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -303,6 +304,7 @@ class Report:
     elapsed_seconds: float = 0.0
     demo: bool = False
     workdir: str | None = None
+    query: str | None = None
     schema_version: int = 1
 
     def counts(self) -> dict[str, int]:

@@ -584,6 +584,14 @@ def _is_candidate(relative: str, name: str) -> bool:
     return name.startswith(".env")
 
 
+def _is_placeholder_secret(value: str) -> bool:
+    """Ignore the credential-shaped examples used throughout documentation."""
+    upper = value.upper()
+    if "EXAMPLE" in upper:
+        return True
+    return len(set(upper)) <= 3
+
+
 def _scan_text(
     relative: str,
     name: str,
@@ -598,6 +606,8 @@ def _scan_text(
         for index, match in enumerate(rule.pattern.finditer(text)):
             if index >= 10:
                 break
+            if rule.category == "secret" and _is_placeholder_secret(match.group(0)):
+                continue
             line = text.count("\n", 0, match.start()) + 1
             add(
                 rule.id,

@@ -9,7 +9,7 @@
 
 ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做的是**编排**：
 
-> 输入一个种子仓库（或未来的自然语言需求），召回相似项目，用已有信号做信誉过滤和
+> 输入一个种子仓库或一段需求描述，召回相似项目，用已有信号做信誉过滤和
 > 只读静态检查，最后输出一份分级、可解释、标注了局限的安全准入报告。
 
 它解决的不是“如何发现漏洞”，而是“在决定复用某个轮子之前，如何低成本地做一次
@@ -40,12 +40,11 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 静态扫描：内置规则集，带误报抑制和覆盖上限
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`demo`、`--fail-on`、`--keep-workdir`
+- CLI：`check`、`--idea`、`demo`、`--fail-on`、`--keep-workdir`
 - 测试：fake adapter，全离线
 
 未实现：
 
-- 自然语言需求输入
 - 动态沙箱验证
 - 外部扫描器（Semgrep / OSV / gitleaks）
 - YAML 策略配置
@@ -86,14 +85,14 @@ src/reuseguard/
 | --- | --- | --- |
 | `RepoRef` | 校验后的 owner/name | `owner`, `name` |
 | `RepoMeta` | GitHub 元数据 | stars, topics, language, pushed_at, archived, size_kb |
-| `Similarity` | 可解释的相似度 | total, topics, language, recency, popularity |
-| `Candidate` | seed 或 alternative | repo, role, similarity |
+| `Similarity` | 可解释的相似度 | total, topics, keywords, language, recency, popularity |
+| `Candidate` | seed / alternative / candidate | repo, role, similarity |
 | `FilterResult` | 信誉过滤结果 | status, score, checks, reasons, warnings |
 | `Finding` | 单条静态发现 | rule_id, severity, path, line, evidence, suppressed |
 | `ScanReport` | 扫描结果 | status, risk, findings, files_scanned, truncated |
 | `Verdict` | 最终结论 | decision, confidence, reasons, limitations |
 | `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict |
-| `Report` | 一次运行的完整结果 | seed, assessments, queries, warnings, settings |
+| `Report` | 一次运行的完整结果 | seed, query, assessments, queries, warnings, settings |
 
 `Report.to_dict()` 会递归把 dataclass / Enum / datetime / Path 转成 JSON 类型，并附加
 `counts`。token 永远不会进入 `Report`。
@@ -125,6 +124,24 @@ topic → 出现在仓库名里的 topic → 带连字符的 topic → 较短的
 
 召回结果只用于排序，不进入安全结论。GitHub Search 失败或限流会变成 `warnings`，
 不会中断种子仓库的评估。
+
+#### `--idea` 模式
+
+没有种子仓库时，从需求描述提取最多 5 个 ASCII 关键词，生成两条查询：
+
+1. 前 4 个关键词 + `--language` + stars / fork
+2. 前 2 个关键词 + `--language` + stars / fork（更宽）
+
+若没有 ASCII 关键词（例如纯中文需求），把清洗后的原文作为查询词。候选按以下 0–100
+分排序：
+
+- 关键词覆盖率 × 40：仓库名、描述、topics 的 token 中命中了多少需求关键词
+- 语言：指定语言时相同 20，不同 0；未指定时中性 10
+- 最近 push：20
+- 热度：20
+
+`--idea` 模式不评估种子仓库，所有候选的 role 为 `candidate`；报告头使用 `Idea:` 而不是
+`Seed:`。`--idea` 与 URL 互斥，且不能与 `--no-recall` 同用。
 
 ### 7.2 信誉过滤
 
@@ -264,9 +281,10 @@ reuseguard check tconbeer/harlequin --limit 0
 
 - **M1（已完成）**：种子 → 召回 → Scorecard → 静态扫描 → Markdown
 - **M2（已完成）**：JSON、`--fail-on`、demo、抑制、CI、打包
-- **M3**：自然语言输入
-  - 复用 `build_queries`，但输入改为需求描述
-  - 需要解决：关键词提取、查询扩展、候选去重
+- **M3（已完成）**：自然语言输入
+  - `check --idea TEXT [--language LANG]`
+  - 关键词提取、宽/窄两条查询、关键词覆盖率排序
+  - `Report.seed` 可为空，报告头使用 `Idea:`
 - **M4**：隔离动态验证
   - 只对 high/critical 或用户显式要求触发
   - 容器内运行，观察网络 / 文件 / 进程；结果只代表单次运行

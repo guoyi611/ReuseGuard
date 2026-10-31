@@ -159,6 +159,18 @@ def test_private_key_is_medium_not_blocking(tmp_path: Path) -> None:
     assert report.risk is RiskLevel.MEDIUM
 
 
+def test_documentation_example_aws_key_is_ignored(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {"provider.py": 'aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"\n'},
+    )
+
+    report = scan_directory(tmp_path)
+
+    assert report.risk is RiskLevel.NONE
+    assert not any(f.rule_id == "aws-access-key" for f in report.effective_findings)
+
+
 def test_prefixed_test_directory_is_suppressed(tmp_path: Path) -> None:
     _write(
         tmp_path,

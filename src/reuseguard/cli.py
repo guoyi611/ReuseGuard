@@ -41,16 +41,33 @@ def build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser(
         "check",
         parents=[common],
-        help="assess a GitHub repository and find safer alternatives",
-        description="Assess a GitHub repository and rank similar alternatives by safety signals.",
+        help="assess a repository, or discover repositories from an idea",
+        description=(
+            "Assess a GitHub repository and rank similar alternatives, or discover "
+            "candidates from a natural-language requirement."
+        ),
     )
-    check.add_argument("url", help="GitHub URL, owner/repo, or git@github.com:owner/repo.git")
+    check.add_argument(
+        "url",
+        nargs="?",
+        help="GitHub URL, owner/repo, or git@github.com:owner/repo.git",
+    )
+    check.add_argument(
+        "--idea",
+        metavar="TEXT",
+        help="describe what you want to build instead of providing a seed URL",
+    )
+    check.add_argument(
+        "--language",
+        metavar="LANG",
+        help="optional primary language filter when using --idea",
+    )
     check.add_argument(
         "--limit",
         type=_non_negative_int,
         default=5,
         metavar="N",
-        help="maximum number of alternatives to assess (default: 5)",
+        help="maximum number of candidates to assess (default: 5)",
     )
     check.add_argument(
         "--min-stars",
@@ -62,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--no-recall",
         action="store_true",
-        help="assess only the seed repository",
+        help="assess only the seed repository (URL mode)",
     )
     check.add_argument(
         "--no-scorecard",
@@ -172,11 +189,31 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_check(args: argparse.Namespace) -> int:
-    try:
-        ref = RepoRef.parse(args.url)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    idea = (args.idea or "").strip()
+    ref: RepoRef | None = None
+
+    if idea and args.url:
+        print("error: provide either a repository URL or --idea, not both", file=sys.stderr)
         return 2
+    if not idea and not args.url:
+        print("error: provide a repository URL or --idea TEXT", file=sys.stderr)
+        return 2
+    if idea and args.no_recall:
+        print("error: --no-recall is only valid with a seed repository", file=sys.stderr)
+        return 2
+    if idea and args.limit == 0:
+        print("error: --limit must be at least 1 when using --idea", file=sys.stderr)
+        return 2
+    if not idea and args.language:
+        print("error: --language is only valid with --idea", file=sys.stderr)
+        return 2
+
+    if args.url:
+        try:
+            ref = RepoRef.parse(args.url)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     token = None if args.no_gh_token else resolve_github_token(allow_gh_cli=True)
     if token is None:
@@ -218,9 +255,15 @@ def _run_check(args: argparse.Namespace) -> int:
             ) as scorecard,
         ):
             pipeline = Pipeline(settings, github, scorecard)
-            report = pipeline.run(ref)
+            if idea:
+                logger.info("Discovering repositories for an idea")
+                report = pipeline.run_idea(idea, language=args.language)
+            else:
+                assert ref is not None
+                report = pipeline.run(ref)
     except GitHubNotFound:
-        print(f"error: {ref.full_name} was not found or is not public", file=sys.stderr)
+        name = ref.full_name if ref is not None else "repository"
+        print(f"error: {name} was not found or is not public", file=sys.stderr)
         return 1
     except GitHubRateLimit as exc:
         print(f"error: {exc}", file=sys.stderr)

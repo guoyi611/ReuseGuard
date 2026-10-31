@@ -7,9 +7,13 @@ from datetime import datetime, timedelta, timezone
 from reuseguard.adapters.github import GitHubRateLimit
 from reuseguard.models import RepoMeta
 from reuseguard.stages.recall import (
+    build_idea_queries,
     build_queries,
+    extract_idea_keywords,
     extract_keywords,
+    recall_idea,
     recall_similar,
+    score_idea_similarity,
     score_similarity,
 )
 from tests.fakes import FakeGitHub, make_repo
@@ -124,3 +128,86 @@ def test_score_similarity_handles_missing_topics_and_language() -> None:
 
     assert similarity.topics == 0.0
     assert similarity.language == 10.0
+
+
+def test_extract_idea_keywords_drops_stopwords() -> None:
+    keywords = extract_idea_keywords(
+        "I want a fast HTTP client for Python with retries and connection pooling",
+        limit=5,
+    )
+
+    assert "http" in keywords
+    assert "client" in keywords
+    assert "want" not in keywords
+
+
+def test_build_idea_queries_uses_broad_and_narrow_variants() -> None:
+    queries = build_idea_queries(
+        "A fast HTTP client with retries",
+        language="Python",
+        min_stars=100,
+    )
+
+    assert len(queries) == 2
+    assert queries[0].startswith("http client retries language:Python")
+    assert queries[1].startswith("http client language:Python")
+    assert all("stars:>=100" in query and "fork:false" in query for query in queries)
+
+
+def test_build_idea_queries_falls_back_to_raw_text() -> None:
+    queries = build_idea_queries("做一个网络客户端", language="Python")
+
+    assert queries
+    assert "language:Python" in queries[0]
+
+
+def test_score_idea_similarity_rewards_keyword_coverage() -> None:
+    candidate = make_repo(
+        full_name="acme/http",
+        description="A fast HTTP client with retries",
+        language="Python",
+        stars=1000,
+        pushed_at=NOW - timedelta(days=2),
+    )
+
+    similarity = score_idea_similarity(
+        ["http", "client"],
+        candidate,
+        language="Python",
+        now=NOW,
+    )
+
+    assert similarity.keywords == 40.0
+    assert similarity.language == 20.0
+    assert similarity.total > 80.0
+
+
+def test_recall_idea_ranks_matching_candidates_without_a_seed() -> None:
+    matching = make_repo(
+        full_name="acme/http",
+        description="A fast HTTP client",
+        language="Python",
+    )
+    unrelated = make_repo(
+        full_name="acme/db",
+        description="A database driver",
+        language="Go",
+        topics=["database"],
+    )
+    github = FakeGitHub(matching, results=[unrelated, matching])
+
+    result = recall_idea(
+        "fast HTTP client",
+        github,
+        limit=2,
+        language="Python",
+        now=NOW,
+    )
+
+    assert [candidate.repo.full_name for candidate in result.candidates] == [
+        "acme/http",
+        "acme/db",
+    ]
+    assert all(candidate.role == "candidate" for candidate in result.candidates)
+    assert result.candidates[0].similarity is not None
+    assert result.candidates[0].similarity.keywords > 0.0

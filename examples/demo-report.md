@@ -3,7 +3,7 @@
 > **Demo report** — generated from built-in fixtures. Repository names, scores, and findings are fictional.
 
 **Seed:** [acme/http-kit](https://github.com/acme/http-kit)<br>
-**Generated:** 2026-10-30 11:32 UTC<br>
+**Generated:** 2026-10-30 12:00 UTC<br>
 **ReuseGuard:** v0.1.0<br>
 **Verdicts:** 2 USE · 1 INSPECT · 2 AVOID
 

@@ -32,22 +32,22 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 v0.1.0 是 MVP，已经可用：
 
-- 输入 `owner/repo`、GitHub URL 或 SSH clone URL
+- 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
 - 用 OpenSSF Scorecard 的公开数据做信誉过滤
 - 下载默认分支的只读快照，做静态风险扫描
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：自然语言需求输入、动态沙箱验证、Semgrep/CodeQL 等外部扫描器接入。见 [Roadmap](#roadmap)。
+尚未实现：动态沙箱验证、Semgrep/CodeQL 等外部扫描器接入、YAML 策略配置。见 [Roadmap](#roadmap)。
 
 ## 工作流
 
 ```text
                  ┌──────────────────────────────┐
 owner/repo  ───► │ 1. Recall                    │
-GitHub URL       │    GitHub Search API         │──► alternatives
-                 │    topic / language / text   │    + similarity score
+GitHub URL       │    GitHub Search API         │──► candidates
+--idea TEXT  ───►│    topic / keyword / language│    + similarity score
                  └──────────────┬───────────────┘
                                 │
                  ┌──────────────▼───────────────┐
@@ -105,6 +105,15 @@ reuseguard check psf/requests --no-recall --format json -o reports/requests.json
 
 如果本机已登录 `gh`，ReuseGuard 会在没有 `GITHUB_TOKEN` / `GH_TOKEN` 时尝试读取 `gh auth token`。用 `--no-gh-token` 可以关闭这个行为。
 
+没有种子仓库、只有需求描述时：
+
+```powershell
+reuseguard check --idea "a fast HTTP client with retries and connection pooling" `
+  --language Python --limit 3
+```
+
+`--idea` 模式不会评估种子仓库，只返回匹配的候选；排序按关键词覆盖率、语言、活跃度和热度计算。中文需求如果没有可提取的英文关键词，会把原文作为查询词。
+
 ### 示例输出
 
 ```markdown
@@ -142,6 +151,8 @@ reuseguard check psf/requests --no-recall --format json -o reports/requests.json
 | 热度 | 20 | 星标数的对数缩放 |
 
 分数只用于排序，不参与安全结论。召回结果受 GitHub Search 限制；**没召回不等于不存在**。
+
+`--idea` 模式没有 topic，因此把 40 分换成关键词覆盖率：候选的仓库名、描述和 topics 中出现了多少比例的需求关键词。语言匹配 20、活跃度 20、热度 20 保持不变。
 
 ## 静态扫描覆盖什么
 
@@ -182,6 +193,7 @@ ReuseGuard 自身也按“被检查的代码不可信”来设计：
 
 ```text
 reuseguard check <url> [options]
+reuseguard check --idea TEXT [--language LANG] [options]
 reuseguard demo [--format md|json] [-o PATH]
 reuseguard --version
 ```
@@ -190,9 +202,12 @@ reuseguard --version
 
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
-| `--limit N` | 5 | 最多评估多少个替代项目 |
+| `url`（位置参数） | — | GitHub URL / `owner/repo` / SSH URL；与 `--idea` 二选一 |
+| `--idea TEXT` | — | 用自然语言需求发现候选；与 `url` 二选一 |
+| `--language LANG` | — | `--idea` 模式下的语言过滤 |
+| `--limit N` | 5 | 最多评估多少个候选 |
 | `--min-stars N` | 50 | 召回候选的最低星标数 |
-| `--no-recall` | off | 只评估种子仓库 |
+| `--no-recall` | off | 只评估种子仓库（仅 URL 模式） |
 | `--no-scorecard` | off | 关闭信誉过滤（结论会变成 INSPECT） |
 | `--no-scan` | off | 关闭快照下载和静态扫描 |
 | `--scorecard-min SCORE` | 2.0 | 低于该分数直接跳过 |
@@ -234,7 +249,7 @@ ruff format --check src tests
 
 - **M1（已完成）**：种子 URL → 召回 → Scorecard → 静态扫描 → Markdown
 - **M2（已完成）**：JSON 输出、`--fail-on`、误报抑制、离线 demo、测试与 CI
-- **M3**：自然语言需求输入，复用 `build_queries` 的多查询策略
+- **M3（已完成）**：`--idea` 自然语言需求输入、关键词召回与排序
 - **M4**：高风险项目的隔离动态验证（容器 / syscall 观察），仅在显式开启时执行
 - **M5**：可插拔外部扫描器（Semgrep、OSV、gitleaks），统一 finding schema
 - **M6**：配置文件（YAML）与策略覆盖，让团队自定义“什么算阻断”

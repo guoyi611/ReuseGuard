@@ -52,6 +52,15 @@ _STOPWORDS = frozenset(
         "your",
         "based",
         "built",
+        "want",
+        "wanna",
+        "need",
+        "needs",
+        "looking",
+        "find",
+        "finding",
+        "something",
+        "anything",
         "easy",
         "fast",
         "free",
@@ -153,14 +162,7 @@ def build_queries(seed: RepoMeta, *, min_stars: int = 50, max_queries: int = 3) 
     if not queries:
         queries.append(" ".join([seed.name, *qualifiers]))
 
-    unique: list[str] = []
-    for query in queries:
-        query = " ".join(query.split())
-        if len(query) > _MAX_QUERY_LENGTH:
-            query = query[:_MAX_QUERY_LENGTH].rsplit(" ", 1)[0]
-        if query and query not in unique:
-            unique.append(query)
-    return unique[:max_queries]
+    return _finalize_queries(queries, max_queries=max_queries)
 
 
 def extract_keywords(seed: RepoMeta, *, limit: int = 4) -> list[str]:
@@ -174,11 +176,28 @@ def extract_keywords(seed: RepoMeta, *, limit: int = 4) -> list[str]:
             ],
         )
     )
-    language = (seed.language or "").lower()
+    return _extract_keywords_from_text(source, limit=limit, exclude={seed.language or ""})
+
+
+def extract_idea_keywords(idea: str, *, limit: int = 5) -> list[str]:
+    """Extract ASCII search terms from a free-form requirement description."""
+    return _extract_keywords_from_text(idea, limit=limit, filter_generic=False)
+
+
+def _extract_keywords_from_text(
+    text: str,
+    *,
+    limit: int,
+    exclude: set[str] | None = None,
+    filter_generic: bool = True,
+) -> list[str]:
+    excluded = {item.lower() for item in (exclude or set()) if item}
     keywords: list[str] = []
     seen: set[str] = set()
-    for token in re.findall(r"[a-z][a-z0-9-]{2,}", source.lower()):
-        if token in _STOPWORDS or token in _GENERIC_TOPICS or token == language:
+    for token in re.findall(r"[a-z][a-z0-9-]{2,}", text.lower()):
+        if token in _STOPWORDS or token in excluded:
+            continue
+        if filter_generic and token in _GENERIC_TOPICS:
             continue
         if token in seen:
             continue
@@ -187,6 +206,155 @@ def extract_keywords(seed: RepoMeta, *, limit: int = 4) -> list[str]:
         if len(keywords) >= limit:
             break
     return keywords
+
+
+def build_idea_queries(
+    idea: str,
+    *,
+    language: str | None = None,
+    min_stars: int = 50,
+    max_queries: int = 3,
+) -> list[str]:
+    """Build search queries from a natural-language requirement.
+
+    GitHub search treats bare terms as conjunctive, so a long sentence can
+    return nothing. The first query uses up to four keywords; a second, broader
+    query drops to the two strongest terms.
+    """
+    qualifiers = [f"stars:>={max(0, min_stars)}", "fork:false"]
+    language_qualifier = f"language:{language}" if language else None
+    keywords = [
+        keyword
+        for keyword in extract_idea_keywords(idea, limit=5)
+        if keyword != (language or "").lower()
+    ]
+    queries: list[str] = []
+
+    if keywords:
+        for count in (4, 2):
+            terms = keywords[:count]
+            if not terms:
+                continue
+            parts = list(terms)
+            if language_qualifier:
+                parts.append(language_qualifier)
+            parts.extend(qualifiers)
+            queries.append(" ".join(parts))
+    else:
+        fallback = " ".join(re.sub(r"[^\w\s-]", " ", idea, flags=re.UNICODE).split())
+        if fallback:
+            parts = [fallback[:120]]
+            if language_qualifier:
+                parts.append(language_qualifier)
+            parts.extend(qualifiers)
+            queries.append(" ".join(parts))
+
+    return _finalize_queries(queries, max_queries=max_queries)
+
+
+def recall_idea(
+    idea: str,
+    client: GitHubClient,
+    *,
+    limit: int,
+    min_stars: int = 50,
+    language: str | None = None,
+    now: datetime | None = None,
+) -> RecallResult:
+    """Search for repositories that match a free-form requirement."""
+    if limit <= 0:
+        return RecallResult()
+
+    queries = build_idea_queries(idea, language=language, min_stars=min_stars)
+    if not queries:
+        return RecallResult(warnings=["No usable search terms were extracted from the idea."])
+
+    found: dict[str, RepoMeta] = {}
+    warnings: list[str] = []
+    per_page = min(50, max(10, limit * 3))
+
+    for query in queries:
+        try:
+            results = client.search_repositories(query, per_page=per_page)
+        except GitHubRateLimit as exc:
+            warnings.append(f"GitHub search stopped early: {exc}")
+            break
+        except GitHubError as exc:
+            warnings.append(f"Search failed for `{query}`: {exc}")
+            continue
+        for repository in results:
+            found.setdefault(repository.full_name, repository)
+
+    moment = now or datetime.now(timezone.utc)
+    keywords = [
+        keyword
+        for keyword in extract_idea_keywords(idea, limit=5)
+        if keyword != (language or "").lower()
+    ]
+    candidates = [
+        Candidate(
+            repo=repository,
+            role="candidate",
+            similarity=score_idea_similarity(
+                keywords,
+                repository,
+                language=language,
+                now=moment,
+            ),
+        )
+        for repository in found.values()
+    ]
+    candidates.sort(
+        key=lambda candidate: (
+            -(candidate.similarity.total if candidate.similarity else 0.0),
+            -candidate.repo.stars,
+            candidate.repo.full_name,
+        )
+    )
+    return RecallResult(queries=queries, candidates=candidates[:limit], warnings=warnings)
+
+
+def score_idea_similarity(
+    keywords: list[str],
+    candidate: RepoMeta,
+    *,
+    language: str | None = None,
+    now: datetime | None = None,
+) -> Similarity:
+    """Score how well a candidate matches a requirement's keywords.
+
+    Keyword coverage is 40 points, language 20, recency 20, and popularity 20.
+    With no language filter, the language component is a neutral 10.
+    """
+    moment = now or datetime.now(timezone.utc)
+    searchable = " ".join(
+        [
+            candidate.full_name,
+            candidate.description or "",
+            " ".join(candidate.topics),
+        ]
+    ).lower()
+    tokens = set(re.findall(r"[a-z0-9+#.-]+", searchable))
+
+    matched = sum(1 for keyword in keywords if keyword in tokens)
+    keyword_score = 40.0 * matched / len(keywords) if keywords else 0.0
+
+    if language:
+        language_score = 20.0 if (candidate.language or "").lower() == language.lower() else 0.0
+    else:
+        language_score = 10.0
+
+    recency_score = _recency_component(candidate, moment)
+    popularity_score = _popularity_component(candidate)
+    total = round(keyword_score + language_score + recency_score + popularity_score, 1)
+
+    return Similarity(
+        total=total,
+        keywords=round(keyword_score, 1),
+        language=round(language_score, 1),
+        recency=round(recency_score, 1),
+        popularity=round(popularity_score, 1),
+    )
 
 
 def recall_similar(
@@ -260,15 +428,8 @@ def score_similarity(
     else:
         language_score = 10.0
 
-    recency_score = 0.0
-    if candidate.pushed_at is not None:
-        pushed = candidate.pushed_at
-        if pushed.tzinfo is None:
-            pushed = pushed.replace(tzinfo=timezone.utc)
-        days = max(0, (moment - pushed).days)
-        recency_score = 20.0 * max(0.0, 1.0 - days / 1095.0)
-
-    popularity_score = 20.0 * min(1.0, math.log10(max(candidate.stars, 1) + 1) / 5.0)
+    recency_score = _recency_component(candidate, moment)
+    popularity_score = _popularity_component(candidate)
     total = round(topic_score + language_score + recency_score + popularity_score, 1)
 
     return Similarity(
@@ -278,6 +439,31 @@ def score_similarity(
         recency=round(recency_score, 1),
         popularity=round(popularity_score, 1),
     )
+
+
+def _recency_component(candidate: RepoMeta, moment: datetime) -> float:
+    if candidate.pushed_at is None:
+        return 0.0
+    pushed = candidate.pushed_at
+    if pushed.tzinfo is None:
+        pushed = pushed.replace(tzinfo=timezone.utc)
+    days = max(0, (moment - pushed).days)
+    return 20.0 * max(0.0, 1.0 - days / 1095.0)
+
+
+def _popularity_component(candidate: RepoMeta) -> float:
+    return 20.0 * min(1.0, math.log10(max(candidate.stars, 1) + 1) / 5.0)
+
+
+def _finalize_queries(queries: list[str], *, max_queries: int) -> list[str]:
+    unique: list[str] = []
+    for query in queries:
+        query = " ".join(query.split())
+        if len(query) > _MAX_QUERY_LENGTH:
+            query = query[:_MAX_QUERY_LENGTH].rsplit(" ", 1)[0]
+        if query and query not in unique:
+            unique.append(query)
+    return unique[:max_queries]
 
 
 def _select_topics(seed: RepoMeta) -> list[str]:

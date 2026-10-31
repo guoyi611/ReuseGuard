@@ -36,7 +36,7 @@ from .models import (
     ScanReport,
     ScanStatus,
 )
-from .stages.recall import recall_similar
+from .stages.recall import recall_idea, recall_similar
 from .stages.reputation import evaluate_reputation
 from .stages.verdict import decide
 
@@ -89,6 +89,56 @@ class Pipeline:
                 len(recall.queries),
             )
 
+        return self._execute(
+            candidates,
+            started=started,
+            warnings=warnings,
+            queries=queries,
+            seed=seed,
+            query=None,
+        )
+
+    def run_idea(self, idea: str, *, language: str | None = None) -> Report:
+        """Run discovery from a natural-language requirement instead of a seed repo."""
+        started = time.monotonic()
+        warnings: list[str] = []
+
+        logger.info("Searching GitHub for repositories matching an idea")
+        recall = recall_idea(
+            idea,
+            self.github,
+            limit=self.settings.max_candidates,
+            min_stars=self.settings.min_stars,
+            language=language,
+        )
+        warnings.extend(recall.warnings)
+        if not recall.candidates:
+            warnings.append("No candidate repositories were found for this idea.")
+        logger.info(
+            "Found %d candidate(s) using %d search queries",
+            len(recall.candidates),
+            len(recall.queries),
+        )
+
+        return self._execute(
+            recall.candidates,
+            started=started,
+            warnings=warnings,
+            queries=recall.queries,
+            seed=None,
+            query=idea,
+        )
+
+    def _execute(
+        self,
+        candidates: list[Candidate],
+        *,
+        started: float,
+        warnings: list[str],
+        queries: list[str],
+        seed: RepoMeta | None,
+        query: str | None,
+    ) -> Report:
         workdir = Path(tempfile.mkdtemp(prefix="reuseguard-"))
         logger.debug("Working directory: %s", workdir)
 
@@ -145,6 +195,7 @@ class Pipeline:
                 settings=self.settings.public_dict(),
                 elapsed_seconds=elapsed,
                 workdir=str(workdir) if self.settings.keep_workdir else None,
+                query=query,
             )
         finally:
             if owns_client:

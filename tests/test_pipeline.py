@@ -200,3 +200,47 @@ def test_recall_ranking_prefers_more_similar_repository() -> None:
         "acme/close",
         "acme/far",
     ]
+
+
+def test_idea_mode_assesses_candidates_without_a_seed() -> None:
+    dummy_seed = make_repo("acme/dummy")
+    candidate = make_repo(
+        "acme/http-client",
+        description="A fast HTTP client with retries",
+        language="Python",
+    )
+    github = FakeGitHub(dummy_seed, [candidate])
+    scorecard = FakeScorecard({candidate.full_name: scorecard_payload(8.0)})
+    calls: list[str] = []
+
+    report = Pipeline(
+        Settings(max_candidates=3),
+        github,
+        scorecard,
+        snapshot_fn=_snapshot_factory(calls),
+    ).run_idea("fast HTTP client", language="Python")
+
+    assert report.seed is None
+    assert report.query == "fast HTTP client"
+    assert len(report.assessments) == 1
+    assert report.assessments[0].candidate.role == "candidate"
+    assert report.assessments[0].verdict.decision is Decision.USE
+    assert calls == ["acme/http-client"]
+    assert any("language:Python" in query for query in report.recall_queries)
+
+
+def test_idea_mode_with_no_results_returns_empty_report() -> None:
+    dummy_seed = make_repo("acme/dummy")
+    github = FakeGitHub(dummy_seed, [])
+    scorecard = FakeScorecard({})
+
+    report = Pipeline(
+        Settings(max_candidates=3),
+        github,
+        scorecard,
+        snapshot_fn=_snapshot_factory([]),
+    ).run_idea("something with no results", language=None)
+
+    assert report.assessments == []
+    assert report.seed is None
+    assert any("No candidate" in warning for warning in report.warnings)

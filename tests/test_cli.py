@@ -59,8 +59,13 @@ class _DummyClient:
 class _FakePipeline:
     def __init__(self, report) -> None:
         self._report = report
+        self.idea: tuple[str, str | None] | None = None
 
     def run(self, _ref):
+        return self._report
+
+    def run_idea(self, idea: str, *, language: str | None = None):
+        self.idea = (idea, language)
         return self._report
 
 
@@ -93,3 +98,39 @@ def test_check_command_fail_on_avoid_returns_3(
     code = cli.main(["check", "acme/seed", "-o", str(output), "--fail-on", "avoid", "--quiet"])
 
     assert code == 3
+
+
+def test_check_idea_calls_run_idea(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = tmp_path / "idea.md"
+    report = build_demo_report()
+    fake = _FakePipeline(report)
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", lambda *_args, **_kwargs: fake)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "--idea",
+            "fast HTTP client",
+            "--language",
+            "Python",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert fake.idea == ("fast HTTP client", "Python")
+    assert output.exists()
+
+
+def test_check_requires_exactly_one_input(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["check"]) == 2
+    assert cli.main(["check", "acme/seed", "--idea", "x"]) == 2
+    assert cli.main(["check", "--idea", "x", "--no-recall"]) == 2
+    captured = capsys.readouterr()
+    assert "provide" in captured.err
+    assert "--no-recall" in captured.err

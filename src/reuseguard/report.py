@@ -55,39 +55,52 @@ def render_markdown(report: Report) -> str:
             ]
         )
 
-    lines.extend(
+    header: list[str] = []
+    if report.query:
+        header.append(f"**Idea:** {_md(report.query, 300)}<br>")
+    elif report.seed is not None:
+        header.append(f"**Seed:** [{report.seed.full_name}]({_repo_url(report.seed)})<br>")
+    header.extend(
         [
-            f"**Seed:** [{report.seed.full_name}]({_repo_url(report.seed)})<br>",
             f"**Generated:** {_format_datetime(report.generated_at)}<br>",
             f"**ReuseGuard:** v{report.tool_version}<br>",
             f"**Verdicts:** {counts['use']} USE · {counts['inspect']} INSPECT · "
             f"{counts['avoid']} AVOID",
             "",
-            "## Summary",
-            "",
-            "| # | Repository | Role | Stars | Match | Scorecard | Static risk | Verdict |",
-            "|---:|---|---|---:|---:|---:|---|---|",
         ]
     )
 
-    for index, assessment in enumerate(report.assessments, start=1):
-        repo = assessment.candidate.repo
-        match = (
-            f"{assessment.candidate.similarity.total:.1f}"
-            if assessment.candidate.similarity
-            else "—"
+    if report.assessments:
+        header.extend(
+            [
+                "## Summary",
+                "",
+                "| # | Repository | Role | Stars | Match | Scorecard | Static risk | Verdict |",
+                "|---:|---|---|---:|---:|---:|---|---|",
+            ]
         )
-        scorecard = _score(assessment)
-        risk = (
-            assessment.scan.risk.value
-            if assessment.scan.status is ScanStatus.SCANNED
-            else assessment.scan.status.value
-        )
-        lines.append(
-            f"| {index} | [{repo.full_name}]({_repo_url(repo)}) | "
-            f"{_role(assessment)} | {repo.stars:,} | {match} | {scorecard} | "
-            f"{risk} | **{_decision(assessment)}** |"
-        )
+        for index, assessment in enumerate(report.assessments, start=1):
+            repo = assessment.candidate.repo
+            match = (
+                f"{assessment.candidate.similarity.total:.1f}"
+                if assessment.candidate.similarity
+                else "—"
+            )
+            scorecard = _score(assessment)
+            risk = (
+                assessment.scan.risk.value
+                if assessment.scan.status is ScanStatus.SCANNED
+                else assessment.scan.status.value
+            )
+            header.append(
+                f"| {index} | [{repo.full_name}]({_repo_url(repo)}) | "
+                f"{_role(assessment)} | {repo.stars:,} | {match} | {scorecard} | "
+                f"{risk} | **{_decision(assessment)}** |"
+            )
+    else:
+        header.extend(["", "No candidate repositories were found."])
+
+    lines.extend(header)
 
     lines.extend(
         [
@@ -121,11 +134,19 @@ def _render_assessment(index: int, assessment: Assessment) -> list[str]:
     lines.append(f"- **Role:** {_role(assessment)}")
     if assessment.candidate.similarity:
         similarity = assessment.candidate.similarity
-        lines.append(
-            f"- **Similarity:** {similarity.total:.1f}/100 "
-            f"(topics {similarity.topics:.1f} · language {similarity.language:.1f} · "
-            f"recency {similarity.recency:.1f} · popularity {similarity.popularity:.1f})"
+        components: list[str] = []
+        if similarity.keywords:
+            components.append(f"keywords {similarity.keywords:.1f}")
+        if similarity.topics:
+            components.append(f"topics {similarity.topics:.1f}")
+        components.extend(
+            [
+                f"language {similarity.language:.1f}",
+                f"recency {similarity.recency:.1f}",
+                f"popularity {similarity.popularity:.1f}",
+            ]
         )
+        lines.append(f"- **Similarity:** {similarity.total:.1f}/100 ({' · '.join(components)})")
     lines.append(
         f"- **Stats:** {repo.stars:,} stars · {repo.forks:,} forks · "
         f"{_md(repo.language or 'language unknown', 40)} · "
@@ -309,7 +330,7 @@ def _render_run_details(report: Report) -> list[str]:
 
 
 def _role(assessment: Assessment) -> str:
-    return "seed" if assessment.candidate.is_seed else "alternative"
+    return assessment.candidate.role or "alternative"
 
 
 def _repo_url(repo: RepoMeta) -> str:

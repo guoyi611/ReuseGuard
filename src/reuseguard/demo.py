@@ -26,7 +26,7 @@ from .models import (
 from .stages.recall import score_similarity
 from .stages.verdict import decide
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
 
 
 def build_demo_report() -> Report:

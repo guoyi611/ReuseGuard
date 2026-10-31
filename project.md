@@ -18,7 +18,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 ## 2. 不做什么
 
 - 不做通用代码扫描平台（VibeGuard / secureCodeBox 的领域）
-- 不自己实现沙箱（v0.1 不做动态执行）
+- 不自己实现沙箱（v0.2 不做动态执行）
 - 不保证“绝对安全”，只聚合信号并写明置信边界
 - 不把仓库内容上传给 LLM
 - 不替用户做最终决定；`AVOID` 也是分诊，不是恶意软件判决
@@ -29,25 +29,25 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.1.0）
+## 4. 当前状态（v0.2.0）
 
 已实现：
 
-- 输入解析：GitHub URL / `owner/repo` / SSH URL
+- 输入解析：GitHub URL / `owner/repo` / SSH URL，或 `--idea` 需求描述
 - 召回：GitHub Search，最多 3 条查询，四维相似度排序
 - 信誉过滤：OpenSSF Scorecard 公共服务
 - 快照：`codeload.github.com` tarball，安全解包，无 `git clone`
 - 静态扫描：内置规则集，带误报抑制和覆盖上限
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`demo`、`--fail-on`、`--keep-workdir`
+- CLI：`check`、`--idea`、`--config`、`demo`、`--fail-on`、`--keep-workdir`
+- 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 测试：fake adapter，全离线
 
 未实现：
 
 - 动态沙箱验证
 - 外部扫描器（Semgrep / OSV / gitleaks）
-- YAML 策略配置
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
 
 ## 5. 架构
@@ -55,7 +55,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 ```text
 src/reuseguard/
 ├── cli.py              # argparse、日志、退出码、输出
-├── config.py           # Settings、token 解析
+├── config.py           # Settings、YAML Policy、token 解析
 ├── models.py           # 纯数据契约，无 I/O
 ├── pipeline.py         # 阶段编排、临时目录、错误降级
 ├── report.py           # Markdown / JSON 渲染
@@ -219,15 +219,31 @@ scan risk low/none:
   scan truncated                                → INSPECT
   filter disabled                               → INSPECT
   filter unknown                                → INSPECT
-  filter score < 5.0                            → INSPECT
+  filter score < use_scorecard_min           → INSPECT
   otherwise                                     → USE (high confidence)
 ```
 
-这里的 5.0 是 **USE 门槛**，与 `--scorecard-min` 的 2.0 **skip 门槛**不同：
+`use_scorecard_min` 默认 5.0，可用 `--config` 的 `thresholds.use_scorecard_min` 覆盖；
+`--scorecard-min`（默认 2.0）是 **skip 门槛**，两者不同：
 
-- < 2.0：连扫描都不做，直接 AVOID
-- 2.0–5.0：扫描，但结论最多 INSPECT
-- ≥ 5.0 且扫描干净：USE
+- < scorecard_min：连扫描都不做，直接 AVOID
+- scorecard_min–use_scorecard_min：扫描，但结论最多 INSPECT
+- ≥ use_scorecard_min 且扫描干净：USE
+
+### 7.6 策略配置
+
+`--config PATH` 加载 YAML，支持：
+
+- `thresholds`：`scorecard_min`、`use_scorecard_min`
+- `limits`：候选数、星标门槛、下载 / 扫描上限、超时
+- `features`：`recall` / `scorecard` / `scan` 开关
+- `rules.disable`：按 rule ID 关闭规则
+- `rules.severity`：把规则覆盖为 low / medium / high / critical
+- `suppress.paths`：额外抑制 glob
+
+优先级：显式 CLI > YAML > 内置默认。未知 key、未知 rule ID、非法 severity 或类型错误
+都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()` 会把最终生效的
+规则策略写入报告，便于审计。
 
 ## 8. 安全模型
 
@@ -275,6 +291,8 @@ scan risk low/none:
 reuseguard check psf/requests --limit 2
 reuseguard check elastic/elasticsearch-py --limit 0
 reuseguard check tconbeer/harlequin --limit 0
+reuseguard check --idea "fast HTTP client with retries" --language Python --limit 3
+reuseguard check psf/requests --config examples/reuseguard.yaml
 ```
 
 ## 10. 里程碑
@@ -291,9 +309,10 @@ reuseguard check tconbeer/harlequin --limit 0
 - **M5**：外部扫描器
   - 统一 `Finding` schema
   - Semgrep / OSV / gitleaks 适配器，失败可降级
-- **M6**：YAML 策略
-  - 自定义 skip 阈值、抑制路径、规则启停
-  - 团队级“什么算阻断”
+- **M6（已完成）**：YAML 策略
+  - `--config PATH`
+  - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob
+  - 未知 key / 规则 / 类型直接报错
 
 ## 11. 决策记录
 
@@ -307,7 +326,8 @@ reuseguard check tconbeer/harlequin --limit 0
 | 误报策略 | 文档/测试降权而非删除 | 保留证据，同时避免 README 安装说明导致 AVOID |
 | pickle 等级 | medium | 本地缓存等合法用法常见；单独出现不应直接 AVOID |
 | `--no-scorecard` | 结论最多 INSPECT | 没有信誉证据时不应给 USE |
-| 动态验证 | v0.1 不做 | 成本高、边界复杂；先验证静态链路 |
+| 策略文件 | 严格 YAML + 未知 key 报错 | 拼写错误不应静默放宽安全策略 |
+| 动态验证 | v0.2 不做 | 成本高、边界复杂；先验证静态链路 |
 
 ## 12. 开放问题
 
@@ -316,7 +336,7 @@ reuseguard check tconbeer/harlequin --limit 0
 3. **正则误报**：是否需要基于 AST 的规则来区分 `pickle.load` 的来源？
 4. **Scorecard 覆盖**：未收录仓库只能 INSPECT，是否提供本地 `scorecard` CLI 回退？
 5. **沙箱**：Docker / gVisor 的可用性检测、超时、网络隔离怎么做？
-6. **策略配置**：抑制路径和阈值是否应该按团队可配置？
+6. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
 7. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
 
 ## 13. 如何扩展

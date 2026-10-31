@@ -299,7 +299,7 @@ def _render_limitations() -> list[str]:
         "not inspected.",
         "- Results reflect public data at the time of the run; a later commit can behave "
         "differently.",
-        "- Dynamic sandbox verification is not part of v0.1.",
+        "- Dynamic sandbox verification is not part of v0.2.",
     ]
 
 
@@ -310,10 +310,28 @@ def _render_run_details(report: Report) -> list[str]:
     if report.settings:
         token_state = "configured" if report.settings.get("token_configured") else "not configured"
         lines.append(
-            f"- Limits: {report.settings.get('max_candidates', '?')} alternatives, "
+            f"- Limits: {report.settings.get('max_candidates', '?')} candidates, "
             f"{report.settings.get('max_repo_mb', '?')} MB per repository, "
             f"GitHub token {token_state}"
         )
+        config_path = report.settings.get("config_path")
+        if config_path:
+            lines.append(f"- Policy file: `{_code(config_path, 240)}`")
+        disabled_rules = report.settings.get("disabled_rules") or []
+        if disabled_rules:
+            lines.append(f"- Disabled rules: {', '.join(f'`{rule}`' for rule in disabled_rules)}")
+        overrides = report.settings.get("severity_overrides") or {}
+        if overrides:
+            rendered = ", ".join(
+                f"`{rule}` → {severity}" for rule, severity in sorted(overrides.items())
+            )
+            lines.append(f"- Severity overrides: {rendered}")
+        suppress_paths = report.settings.get("suppress_paths") or []
+        if suppress_paths:
+            lines.append(
+                "- Extra suppression paths: "
+                + ", ".join(f"`{_code(pattern, 120)}`" for pattern in suppress_paths)
+            )
     if report.recall_queries:
         lines.append("- Search queries:")
         for query in report.recall_queries:

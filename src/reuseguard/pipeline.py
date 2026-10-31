@@ -168,7 +168,12 @@ class Pipeline:
                 if filter_result.status is FilterStatus.SKIPPED:
                     logger.info("  reputation filter rejected the repository")
                 scan = self._scan(candidate.repo, workdir, filter_result, warnings, active_client)
-                verdict = decide(candidate.repo, filter_result, scan)
+                verdict = decide(
+                    candidate.repo,
+                    filter_result,
+                    scan,
+                    use_scorecard_min=self.settings.use_scorecard_min,
+                )
                 logger.info(
                     "  -> %s (scan: %s, scorecard: %s)",
                     verdict.decision.value.upper(),
@@ -258,7 +263,13 @@ class Pipeline:
             max_total_bytes=self.settings.max_scan_mb * 1024 * 1024,
         )
         try:
-            return self._scan_fn(snapshot.root, limits=limits)
+            return self._scan_fn(
+                snapshot.root,
+                limits=limits,
+                disabled_rules=self.settings.disabled_rules,
+                severity_overrides=self.settings.severity_overrides,
+                suppress_globs=self.settings.suppress_paths,
+            )
         except Exception as exc:  # noqa: BLE001 - a scanner bug must not crash the run
             logger.debug("scanner failed for %s", repo.full_name, exc_info=True)
             return ScanReport(status=ScanStatus.ERROR, error=f"scanner failed: {exc}")

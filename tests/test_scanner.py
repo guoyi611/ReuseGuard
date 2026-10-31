@@ -318,3 +318,39 @@ def test_invalid_package_json_does_not_crash(tmp_path: Path) -> None:
     report = scan_directory(tmp_path)
 
     assert report.status is ScanStatus.SCANNED
+
+
+def test_disabled_rule_is_not_reported(tmp_path: Path) -> None:
+    _write(tmp_path, {"app.py": "import pickle\nvalue = pickle.loads(blob)\n"})
+
+    report = scan_directory(
+        tmp_path,
+        disabled_rules=frozenset({"py-unsafe-deserialize"}),
+    )
+
+    assert report.risk is RiskLevel.NONE
+    assert not any(f.rule_id == "py-unsafe-deserialize" for f in report.findings)
+
+
+def test_severity_override_changes_risk(tmp_path: Path) -> None:
+    _write(tmp_path, {"app.py": "result = eval(value)\n"})
+
+    report = scan_directory(
+        tmp_path,
+        severity_overrides={"py-eval-exec": RiskLevel.HIGH},
+    )
+
+    assert report.risk is RiskLevel.HIGH
+    assert any(f.severity is RiskLevel.HIGH for f in report.effective_findings)
+
+
+def test_policy_suppression_glob_marks_findings_suppressed(tmp_path: Path) -> None:
+    _write(tmp_path, {"src/generated/app.py": "result = eval(value)\n"})
+
+    report = scan_directory(tmp_path, suppress_globs=("src/generated/*",))
+
+    assert report.risk is RiskLevel.NONE
+    assert report.effective_findings == []
+    assert any(
+        "policy suppression" in (f.suppression_reason or "") for f in report.suppressed_findings
+    )

@@ -22,7 +22,7 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 | --- | --- |
 | 一个把已有信号串起来的编排层 | 一个新的漏洞扫描引擎 |
 | 一次命令得到分级结论和证据 | “一键保证安全”的平台 |
-| 对仓库做**只读**静态检查 | 动态沙箱或行为分析（v0.1 不做） |
+| 对仓库做**只读**静态检查 | 动态沙箱或行为分析（v0.2 不做） |
 | 明确写出每个结论的边界 | 用高分暗示“绝对安全” |
 | 可替换适配器的 CLI 工具 | 锁定某个 SaaS 的托管服务 |
 
@@ -30,7 +30,7 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.1.0 是 MVP，已经可用：
+v0.2.0 是 MVP，已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
@@ -39,7 +39,7 @@ v0.1.0 是 MVP，已经可用：
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：动态沙箱验证、Semgrep/CodeQL 等外部扫描器接入、YAML 策略配置。见 [Roadmap](#roadmap)。
+尚未实现：动态沙箱验证、Semgrep/CodeQL 等外部扫描器接入。见 [Roadmap](#roadmap)。
 
 ## 工作流
 
@@ -129,7 +129,7 @@ reuseguard check --idea "a fast HTTP client with retries and connection pooling"
 
 ## 结论怎么读
 
-| 结论 | 触发条件（v0.1） | 建议动作 |
+| 结论 | 触发条件（v0.2） | 建议动作 |
 | --- | --- | --- |
 | **USE** | Scorecard ≥ 5.0，扫描完整，无 medium 及以上有效发现，未归档 | 可以进入下一步评估，但仍需读报告 |
 | **INSPECT FIRST** | 有 medium 发现；或 Scorecard 未知 / 被关闭 / < 5；或仓库已归档；或扫描被截断 / 未完成 | 人工看具体文件和原因 |
@@ -189,6 +189,37 @@ ReuseGuard 自身也按“被检查的代码不可信”来设计：
 
 已知边界：GitHub 生成的 tarball 本身是可信来源，但仓库内容不可信；静态扫描只覆盖文本文件，不覆盖二进制、vendored 依赖和生成代码。
 
+## 策略配置
+
+团队可以用 YAML 覆盖阈值、限制、功能开关、规则启停和抑制路径，示例见 [examples/reuseguard.yaml](examples/reuseguard.yaml)。
+
+```powershell
+reuseguard check psf/requests --config examples/reuseguard.yaml
+```
+
+```yaml
+version: 1
+thresholds:
+  scorecard_min: 2.0
+  use_scorecard_min: 5.0
+limits:
+  max_candidates: 5
+  min_stars: 50
+features:
+  recall: true
+  scorecard: true
+  scan: true
+rules:
+  disable: [generic-secret]
+  severity:
+    py-eval-exec: high
+suppress:
+  paths:
+    - "src/generated/**"
+```
+
+优先级：**显式 CLI 参数 > YAML > 内置默认值**。配置文件里的未知 key、未知规则 ID、非法 severity 会直接报错，避免拼写错误悄悄放宽策略。`suppress.paths` 命中的发现仍保留在 JSON 中，但标记为 suppressed，不计入风险等级。
+
 ## CLI
 
 ```text
@@ -205,6 +236,7 @@ reuseguard --version
 | `url`（位置参数） | — | GitHub URL / `owner/repo` / SSH URL；与 `--idea` 二选一 |
 | `--idea TEXT` | — | 用自然语言需求发现候选；与 `url` 二选一 |
 | `--language LANG` | — | `--idea` 模式下的语言过滤 |
+| `--config PATH` | — | 加载 YAML 策略（阈值、限制、规则、抑制路径） |
 | `--limit N` | 5 | 最多评估多少个候选 |
 | `--min-stars N` | 50 | 召回候选的最低星标数 |
 | `--no-recall` | off | 只评估种子仓库（仅 URL 模式） |
@@ -232,7 +264,7 @@ reuseguard --version
 - 召回依赖 GitHub Search，查询词和限额会影响结果。
 - 不扫描 vendored 依赖、二进制文件、生成代码；这些地方也可能有风险。
 - 结果是运行时刻的快照；之后的新 commit 可能行为不同。
-- v0.1 没有动态沙箱验证。
+- v0.2 没有动态沙箱验证。
 
 ## 开发
 
@@ -252,7 +284,7 @@ ruff format --check src tests
 - **M3（已完成）**：`--idea` 自然语言需求输入、关键词召回与排序
 - **M4**：高风险项目的隔离动态验证（容器 / syscall 观察），仅在显式开启时执行
 - **M5**：可插拔外部扫描器（Semgrep、OSV、gitleaks），统一 finding schema
-- **M6**：配置文件（YAML）与策略覆盖，让团队自定义“什么算阻断”
+- **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
 
 设计取舍和阶段规则见 [project.md](project.md)。
 

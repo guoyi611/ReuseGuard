@@ -24,7 +24,13 @@ from ..models import (
 _USE_SCORECARD_MIN = 5.0
 
 
-def decide(repo: RepoMeta, filter_result: FilterResult, scan: ScanReport) -> Verdict:
+def decide(
+    repo: RepoMeta,
+    filter_result: FilterResult,
+    scan: ScanReport,
+    *,
+    use_scorecard_min: float = _USE_SCORECARD_MIN,
+) -> Verdict:
     base_limitations = ["Static analysis cannot prove the absence of malicious code."]
 
     if filter_result.status is FilterStatus.SKIPPED:
@@ -168,13 +174,14 @@ def decide(repo: RepoMeta, filter_result: FilterResult, scan: ScanReport) -> Ver
             limitations=[*base_limitations, "No Scorecard evidence is available."],
         )
 
-    if filter_result.score is None or filter_result.score < _USE_SCORECARD_MIN:
+    if filter_result.score is None or filter_result.score < use_scorecard_min:
         score_text = "unknown" if filter_result.score is None else f"{filter_result.score:.1f}/10"
         return Verdict(
             decision=Decision.INSPECT,
             confidence=Confidence.MEDIUM,
             reasons=[
-                f"Scorecard score {score_text} is below the {_USE_SCORECARD_MIN:.1f}/10 USE threshold.",
+                f"Scorecard score {score_text} is below the "
+                f"{use_scorecard_min:.1f}/10 USE threshold.",
                 *reasons,
             ],
             limitations=[

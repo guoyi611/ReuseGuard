@@ -18,6 +18,7 @@ Two design choices keep the signal usable:
 from __future__ import annotations
 
 import codecs
+import fnmatch
 import json
 import os
 import re
@@ -408,6 +409,18 @@ _PATTERN_RULES: tuple[PatternRule, ...] = (
     ),
 )
 
+KNOWN_RULE_IDS = frozenset(rule.id for rule in _PATTERN_RULES) | frozenset(
+    {
+        "npm-lifecycle",
+        "pth-startup-code",
+        "vscode-folder-open",
+        "ci-pwn-request",
+        "ci-write-all",
+        "docker-add-url",
+        "setup-cmdclass",
+    }
+)
+
 _INSTALL_PIPE = re.compile(
     r"\b(?:curl|wget)\b[^\n|]{0,300}\|\s*(?:sudo\s+)?"
     r"(?:(?:ba|z|da|k)?sh|python3?|node|perl|ruby)\b",
@@ -422,9 +435,21 @@ _WORKFLOW_PR_HEAD = re.compile(
 )
 
 
-def scan_directory(root: Path, *, limits: ScanLimits | None = None) -> ScanReport:
-    """Scan ``root`` and return a report. The directory is never executed."""
+def scan_directory(
+    root: Path,
+    *,
+    limits: ScanLimits | None = None,
+    disabled_rules: frozenset[str] = frozenset(),
+    severity_overrides: dict[str, RiskLevel] | None = None,
+    suppress_globs: tuple[str, ...] = (),
+) -> ScanReport:
+    """Scan ``root`` and return a report. The directory is never executed.
+
+    ``disabled_rules`` and ``severity_overrides`` implement policy-file knobs;
+    ``suppress_globs`` extends the built-in documentation/test suppression.
+    """
     limits = limits or ScanLimits()
+    overrides = severity_overrides or {}
     if not root.is_dir():
         return ScanReport(
             status=ScanStatus.ERROR,
@@ -450,6 +475,9 @@ def scan_directory(root: Path, *, limits: ScanLimits | None = None) -> ScanRepor
         evidence: str | None = None,
     ) -> None:
         nonlocal truncated
+        if rule_id in disabled_rules:
+            return
+        severity = overrides.get(rule_id, severity)
         key = (rule_id, path, line or 0)
         if key in seen:
             return
@@ -457,7 +485,7 @@ def scan_directory(root: Path, *, limits: ScanLimits | None = None) -> ScanRepor
         if len(findings) >= limits.max_findings:
             truncated = True
             return
-        reason = _suppression_reason(path)
+        reason = _suppression_reason(path, suppress_globs)
         findings.append(
             Finding(
                 rule_id=rule_id,
@@ -757,7 +785,10 @@ def _is_vscode_tasks(relative: str) -> bool:
     return len(parts) >= 2 and parts[-2] == ".vscode" and parts[-1] == "tasks.json"
 
 
-def _suppression_reason(relative: str) -> str | None:
+def _suppression_reason(relative: str, suppress_globs: tuple[str, ...] = ()) -> str | None:
+    for pattern in suppress_globs:
+        if fnmatch.fnmatch(relative, pattern):
+            return f"matches policy suppression pattern `{pattern}`"
     parts = relative.lower().split("/")
     if any(_is_context_dir(part) for part in parts[:-1]):
         return "documentation, test, or example path"

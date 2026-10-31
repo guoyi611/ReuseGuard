@@ -1,0 +1,53 @@
+# ReuseGuard policy example.
+#
+# Pass with: reuseguard check <repo> --config examples/reuseguard.yaml
+# CLI flags override values from this file. Unknown keys and unknown rule IDs
+# are rejected so a typo cannot silently weaken the policy.
+
+version: 1
+
+thresholds:
+  # Skip the repository (AVOID) below this Scorecard score.
+  scorecard_min: 2.0
+  # A repository needs at least this score to be eligible for USE.
+  use_scorecard_min: 5.0
+
+limits:
+  max_candidates: 5
+  min_stars: 50
+  max_repo_mb: 150
+  max_files: 2000
+  max_file_kb: 1024
+  max_scan_mb: 20
+  timeout: 20
+
+features:
+  recall: true
+  scorecard: true
+  scan: true
+
+rules:
+  # Rule IDs available in this version:
+  #   py-eval-exec, py-shell-true, py-os-command, py-unsafe-deserialize,
+  #   py-marshal-loads, py-encoded-exec, js-eval, js-new-function,
+  #   js-child-process, js-encoded-eval, download-pipe-shell,
+  #   powershell-download-exec, powershell-encoded, unicode-bidi,
+  #   private-key, aws-access-key, github-token, slack-token,
+  #   generic-secret, rm-rf-root, chmod-777, npm-lifecycle,
+  #   pth-startup-code, vscode-folder-open, ci-pwn-request,
+  #   ci-write-all, docker-add-url, setup-cmdclass
+  disable: []
+  severity: {}
+  # Example:
+  # disable: [generic-secret]
+  # severity:
+  #   py-eval-exec: high
+
+suppress:
+  # Glob patterns are matched against repository-relative POSIX paths.
+  # Findings in matching files are still recorded, but do not affect risk.
+  paths: []
+  # Example:
+  # paths:
+  #   - "src/generated/**"
+  #   - "migrations/*.py"

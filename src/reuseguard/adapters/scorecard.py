@@ -24,7 +24,7 @@ class ScorecardNotFound(ScorecardError):
 class ScorecardClient:
     """Fetch precomputed OpenSSF Scorecard results.
 
-    ReuseGuard does not run Scorecard itself in v0.1. It reads the public,
+    ReuseGuard does not run Scorecard itself in v0.2. It reads the public,
     precomputed results, which keeps the pipeline fast and avoids executing
     third-party build steps.
     """

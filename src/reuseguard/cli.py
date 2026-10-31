@@ -7,13 +7,14 @@ import contextlib
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from . import __version__
 from .adapters.github import GitHubClient, GitHubError, GitHubNotFound, GitHubRateLimit
 from .adapters.scorecard import ScorecardClient
-from .config import Settings, resolve_github_token
+from .config import ConfigError, Policy, Settings, load_policy, resolve_github_token
 from .demo import build_demo_report
 from .models import RepoRef, Report
 from .pipeline import Pipeline
@@ -65,16 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--limit",
         type=_non_negative_int,
-        default=5,
+        default=None,
         metavar="N",
         help="maximum number of candidates to assess (default: 5)",
     )
     check.add_argument(
         "--min-stars",
         type=_non_negative_int,
-        default=50,
+        default=None,
         metavar="N",
-        help="minimum star count for recalled alternatives (default: 50)",
+        help="minimum star count for recalled candidates (default: 50)",
     )
     check.add_argument(
         "--no-recall",
@@ -97,44 +98,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not read a token from the gh CLI (environment variables still apply)",
     )
     check.add_argument(
+        "--config",
+        type=Path,
+        metavar="PATH",
+        help="load thresholds, limits, suppression paths, and rule policy from YAML",
+    )
+    check.add_argument(
         "--scorecard-min",
         type=_non_negative_float,
-        default=2.0,
+        default=None,
         metavar="SCORE",
         help="Scorecard score below which a repository is skipped (default: 2.0)",
     )
     check.add_argument(
         "--timeout",
         type=_positive_float,
-        default=20.0,
+        default=None,
         metavar="SECONDS",
         help="network timeout per request (default: 20)",
     )
     check.add_argument(
         "--max-repo-mb",
         type=_positive_int,
-        default=150,
+        default=None,
         metavar="MB",
         help="maximum repository size to download (default: 150)",
     )
     check.add_argument(
         "--max-files",
         type=_positive_int,
-        default=2000,
+        default=None,
         metavar="N",
         help="maximum files to scan per repository (default: 2000)",
     )
     check.add_argument(
         "--max-file-kb",
         type=_positive_int,
-        default=1024,
+        default=None,
         metavar="KB",
         help="maximum size of a single scanned file (default: 1024)",
     )
     check.add_argument(
         "--max-scan-mb",
         type=_positive_int,
-        default=20,
+        default=None,
         metavar="MB",
         help="maximum total bytes to scan per repository (default: 20)",
     )
@@ -201,11 +208,33 @@ def _run_check(args: argparse.Namespace) -> int:
     if idea and args.no_recall:
         print("error: --no-recall is only valid with a seed repository", file=sys.stderr)
         return 2
-    if idea and args.limit == 0:
-        print("error: --limit must be at least 1 when using --idea", file=sys.stderr)
-        return 2
     if not idea and args.language:
         print("error: --language is only valid with --idea", file=sys.stderr)
+        return 2
+
+    try:
+        policy = load_policy(args.config) if args.config else Policy()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.config:
+        logger.debug("Loaded policy from %s", args.config)
+
+    limit = _pick(args.limit, policy.max_candidates, 5)
+    min_stars = _pick(args.min_stars, policy.min_stars, 50)
+    max_repo_mb = _pick(args.max_repo_mb, policy.max_repo_mb, 150)
+    max_files = _pick(args.max_files, policy.max_files, 2000)
+    max_file_kb = _pick(args.max_file_kb, policy.max_file_kb, 1024)
+    max_scan_mb = _pick(args.max_scan_mb, policy.max_scan_mb, 20)
+    timeout = _pick(args.timeout, policy.timeout, 20.0)
+    scorecard_min = _pick(args.scorecard_min, policy.scorecard_min, 2.0)
+    use_scorecard_min = _pick(None, policy.use_scorecard_min, 5.0)
+    enable_recall = bool(_pick(None, policy.recall, True)) and not args.no_recall
+    enable_scorecard = bool(_pick(None, policy.scorecard, True)) and not args.no_scorecard
+    enable_scan = bool(_pick(None, policy.scan, True)) and not args.no_scan
+
+    if idea and limit == 0:
+        print("error: --limit must be at least 1 when using --idea", file=sys.stderr)
         return 2
 
     if args.url:
@@ -228,29 +257,34 @@ def _run_check(args: argparse.Namespace) -> int:
 
     settings = Settings(
         token=token,
-        timeout=args.timeout,
-        max_candidates=args.limit,
-        min_stars=args.min_stars,
-        max_repo_mb=args.max_repo_mb,
-        max_files=args.max_files,
-        max_file_kb=args.max_file_kb,
-        max_scan_mb=args.max_scan_mb,
-        scorecard_min=args.scorecard_min,
-        enable_recall=not args.no_recall,
-        enable_scorecard=not args.no_scorecard,
-        enable_scan=not args.no_scan,
+        timeout=timeout,
+        max_candidates=limit,
+        min_stars=min_stars,
+        max_repo_mb=max_repo_mb,
+        max_files=max_files,
+        max_file_kb=max_file_kb,
+        max_scan_mb=max_scan_mb,
+        scorecard_min=scorecard_min,
+        use_scorecard_min=use_scorecard_min,
+        enable_recall=enable_recall,
+        enable_scorecard=enable_scorecard,
+        enable_scan=enable_scan,
         keep_workdir=args.keep_workdir,
+        disabled_rules=policy.disabled_rules,
+        severity_overrides=policy.severity_overrides,
+        suppress_paths=policy.suppress_paths,
+        config_path=str(args.config) if args.config else None,
     )
 
     try:
         with (
             GitHubClient(
                 token=token,
-                timeout=args.timeout,
+                timeout=timeout,
                 user_agent=settings.user_agent,
             ) as github,
             ScorecardClient(
-                timeout=args.timeout,
+                timeout=timeout,
                 user_agent=settings.user_agent,
             ) as scorecard,
         ):
@@ -323,6 +357,15 @@ def _configure_output_encoding() -> None:
         if reconfigure is not None:
             with contextlib.suppress(OSError, ValueError):
                 reconfigure(encoding="utf-8", errors="replace")
+
+
+def _pick(cli_value: Any, policy_value: Any, default: Any) -> Any:
+    """CLI explicitly set > YAML policy > built-in default."""
+    if cli_value is not None:
+        return cli_value
+    if policy_value is not None:
+        return policy_value
+    return default
 
 
 def _non_negative_int(value: str) -> int:

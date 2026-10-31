@@ -4,7 +4,8 @@
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
 > 当前版本：`0.3.0`
-> 基线提交：`385667d feat: add sandbox safety kernel for isolated verification`（M4 第 1 步）
+> 基线提交：`f39c84b feat: add opt-in sandbox containment checks`（M4 第 2 步；
+> 第 1 步为 `385667d`）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行

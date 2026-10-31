@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..models import Finding, RiskLevel, ScanReport, ScanStatus
 from .process import CommandRunner, run_command
-from .scanner import ScanLimits, suppression_reason
+from .scanner import ScanLimits, relative_to_root, suppression_reason
 
 DEFAULT_SEMGREP_BINARY = "semgrep"
 DEFAULT_RULE_TIMEOUT = 30.0
@@ -225,7 +225,7 @@ def _to_finding(
     if rule_id in disabled_rules:
         return None
 
-    relative = _relative_path(raw.get("path"), root)
+    relative = relative_to_root(raw.get("path"), root)
     if relative is None:
         return None
 
@@ -272,22 +272,6 @@ def _severity(extra: dict, metadata: dict) -> RiskLevel:
         if mapped is not None:
             return mapped
     return RiskLevel.LOW
-
-
-def _relative_path(raw: object, root: Path) -> str | None:
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    try:
-        resolved = candidate.resolve()
-    except OSError:
-        return None
-    try:
-        return resolved.relative_to(root).as_posix()
-    except ValueError:
-        return None
 
 
 def _start_line(value: object) -> int | None:

@@ -33,7 +33,10 @@ def decide(
     *,
     use_scorecard_min: float = _USE_SCORECARD_MIN,
 ) -> Verdict:
-    base_limitations = ["Static analysis cannot prove the absence of malicious code."]
+    base_limitations = [
+        "Static analysis cannot prove the absence of malicious code.",
+        *_scanner_limitations(scan),
+    ]
 
     if filter_result.status is FilterStatus.SKIPPED:
         return Verdict(
@@ -242,3 +245,16 @@ def add_sandbox_caveat(verdict: Verdict, sandbox: SandboxReport | None) -> Verdi
 def _format_finding(finding: Finding) -> str:
     location = f"{finding.path}:{finding.line}" if finding.line else finding.path
     return f"{finding.severity.value.upper()}: {finding.title} ({location})"
+
+
+def _scanner_limitations(scan: ScanReport) -> list[str]:
+    """Add caveats for the coverage of whatever scanners actually ran."""
+    scanners = set(scan.scanner.split("+"))
+    limitations: list[str] = []
+    if "gitleaks" in scanners:
+        limitations.append(
+            "Secret scanning ran gitleaks' built-in rules over the default-branch snapshot; "
+            "it did not inspect git history, releases, or runtime configuration, and a clean "
+            "result is not evidence that no credential was ever committed."
+        )
+    return limitations

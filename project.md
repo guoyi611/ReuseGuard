@@ -30,7 +30,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.4.0）
+## 4. 当前状态（v0.5.0）
 
 已实现：
 
@@ -40,9 +40,10 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 快照：`codeload.github.com` tarball，安全解包，无 `git clone`
 - 静态扫描：内置规则集，带误报抑制和覆盖上限
 - 外部扫描器：Semgrep 适配器（本地规则、JSON → 统一 `Finding`、降级 / 错误边界）
+- 外部扫描器：gitleaks 适配器（`--gitleaks`，内置规则、固定本地配置、凭据脱敏、追加合并）
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--config`、`--semgrep-config`、`--sandbox`、`demo`、
+- CLI：`check`、`--idea`、`--config`、`--semgrep-config`、`--gitleaks`、`--sandbox`、`demo`、
   `--fail-on`、`--keep-workdir`
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
@@ -52,7 +53,8 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 未实现：
 
 - 在沙箱内执行仓库行为（安装、导入、运行测试）
-- OSV（lockfile）与 gitleaks（secret）适配器
+- OSV（lockfile 漏洞）适配器
+- gitleaks 自定义规则集（当前固定使用二进制内置规则）
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
 
 ## 5. 架构
@@ -72,6 +74,7 @@ src/reuseguard/
 │   ├── scanner.py      # 内置静态规则 + 公共抑制策略
 │   ├── process.py      # 通用 argv 子进程边界（shell=False + 超时）
 │   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
+│   ├── gitleaks.py     # gitleaks JSON → 统一 ScanReport（凭据脱敏）
 │   └── sandbox.py      # Docker 检测 + 加固命令 + 隔离探测
 └── stages/
     ├── recall.py       # 查询构造、相似度、召回
@@ -86,6 +89,8 @@ src/reuseguard/
   `unknown` / `error`，而不是让整次运行崩掉。
 - 阶段判定规则集中在 `stages/`，它们是本项目的核心差异点，优先自己维护。
 - 报告渲染不参与判定，只消费 `Report`。
+- 追加式扫描器（gitleaks）返回自己的 `ScanReport`，由 `models.merge_scan_reports()`
+  合并：取最高风险、按 `(rule_id, path, line)` 去重、文件数取最宽而不是相加。
 
 ## 6. 数据契约
 
@@ -97,7 +102,7 @@ src/reuseguard/
 | `Candidate` | seed / alternative / candidate | repo, role, similarity |
 | `FilterResult` | 信誉过滤结果 | status, score, checks, reasons, warnings |
 | `Finding` | 单条静态发现 | rule_id, severity, path, line, evidence, suppressed |
-| `ScanReport` | 扫描结果 | status, risk, findings, files_scanned, truncated |
+| `ScanReport` | 扫描结果 | status, risk, findings, files_scanned, truncated, scanner（合并后可为 `semgrep+gitleaks`） |
 | `SandboxReport` | 一次容器隔离探测的证据 | status, image, exit_code, timed_out, containment_ok, probe, error |
 | `Verdict` | 最终结论 | decision, confidence, reasons, limitations |
 | `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict, sandbox |
@@ -327,6 +332,44 @@ semgrep scan --json --quiet --metrics=off --disable-version-check
 - 配置缺失、非零退出、超时、JSON 非法 → `ScanReport(status=ERROR, scanner="semgrep")`，
   **不静默降级**；结论为 INSPECT。
 
+### 7.9 外部扫描器：gitleaks（M5 第二步，追加式）
+
+`--gitleaks` 开启，默认关闭。它在**内置扫描或 Semgrep 之后**运行，结果合并进同一个
+`ScanReport`（`scanner` 形如 `builtin-patterns+gitleaks`）。之所以是追加而不是替换：
+凭据扫描和安装钩子/执行模式是不同证据，替换会缩小覆盖范围。
+
+调用方式（`shell=False`，argv 列表）：
+
+```text
+gitleaks dir <root>
+  --report-format json --report-path <tmp>/report.json
+  --config <tmp>/reuseguard-gitleaks.toml
+  --gitleaks-ignore-path <tmp>
+  --ignore-gitleaks-allow --exit-code 0 --redact
+  --no-banner --no-color --max-target-megabytes N
+```
+
+- 需要 gitleaks 提供 `dir` 命令（v8.19+）。已弃用的 `detect --no-git` 不使用；命令不被
+  接受时（退出码 126）报 scan error，而不是静默降级。
+- **被检查的仓库不能决定规则。** gitleaks 默认会读快照内的 `.gitleaks.toml`（可整体替换
+  或 allowlist 规则）、`.gitleaksignore`（按 fingerprint 忽略发现）和 `# gitleaks:allow`
+  行内注释。适配器固定 `--config` 为 ReuseGuard 生成的最小配置
+  （`[extend] useDefault = true`，即二进制内置规则），`--gitleaks-ignore-path` 指向空目录，
+  并加 `--ignore-gitleaks-allow`。
+- JSON 报告写到私有临时目录（不写快照），读取上限 16 MB；`--max-target-megabytes`
+  跟随 `--max-file-kb`（向上取整）。
+- 凭据脱敏：工具先 `--redact`，适配器再从 `Secret` 字段替换一次。`Finding.evidence`
+  只保留单行、脱敏后的匹配片段；`Secret` 原文不进入任何字段。secret 缺失或长度 < 4 时
+  直接丢弃匹配行，避免部分泄露。
+- severity：私钥和知名厂商 token（AWS / GCP / GitHub / Slack / Stripe 等）→ high；
+  `generic-*` 等熵规则与未知规则 → medium。gitleaks 没有 severity 字段，这是适配器
+  映射，不是工具结论。
+- 复用 `suppression_reason()`：docs/tests/examples 的命中仍记为 suppressed。
+- 找不到可执行文件 → 跳过并写 warning；超时、非零退出、报告缺失/过大/非法 → scan error。
+
+诚实边界：gitleaks 不报告扫描文件数，合并报告沿用基础扫描器的 `files_scanned`；它只扫
+默认分支快照、不扫 git 历史，因此“没发现凭据”不等于“从未泄露过”。
+
 ## 8. 安全模型
 
 被检查的仓库是不可信输入。安全边界：
@@ -342,19 +385,25 @@ semgrep scan --json --quiet --metrics=off --disable-version-check
 6. **外部扫描器**：Semgrep 只接受本地规则路径，禁止 `--config auto`，关闭
    metrics / 版本检查；argv 列表、`shell=False`、显式超时；输出按不可信 JSON 解析，
    越界路径丢弃。
-7. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
+7. **gitleaks 边界**：只调用本机二进制；固定 `--config` 忽略仓库 `.gitleaks.toml`，
+   `--gitleaks-ignore-path` 指向空目录，`--ignore-gitleaks-allow` 关闭行内白名单；
+   报告写在私有临时目录并限制大小；finding 只保留脱敏证据。
+8. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
    `api.securityscorecards.dev`。不调用 LLM，不上传内容。Semgrep 不会因扫描而联网
-   （本地规则 + `--metrics=off` + `--disable-version-check`）。
-8. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
-   不写入报告、不打印、不落盘。
-9. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
-   `|` 会转义。容器探测输出和外部扫描器输出同样按不可信数据处理。
+   （本地规则 + `--metrics=off` + `--disable-version-check`）；gitleaks 只用本地规则，
+   不访问网络。
+9. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
+   不写入报告、不打印、不落盘。被检查仓库里的凭据同样不写进报告，只保留 `[REDACTED]`。
+10. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
+    `|` 会转义。容器探测输出和外部扫描器输出同样按不可信数据处理。
 
 剩余风险：
 
 - tarball 下载和解压仍消耗磁盘 / 带宽；已有大小上限，但不是硬隔离。
 - 静态扫描存在漏报；沙箱当前只验证隔离，不观察仓库行为。
 - Semgrep 的覆盖范围取决于用户提供的规则集；`.semgrepignore` 仍可能缩小扫描范围。
+- gitleaks 的规则集来自本机安装的二进制；仓库提供的配置/白名单被刻意忽略，但团队
+  自定义规则仍需后续支持。它只扫默认分支快照，不覆盖 git 历史。
 - 沙箱依赖本机 Docker daemon、容器运行时和本地镜像；这些仍是信任边界。
 - 私有仓库的 tarball 访问需要 token；当前实现不向 codeload 发送 token，
   因此私有仓库可能下载失败（会降级为 scan error → INSPECT）。
@@ -379,6 +428,10 @@ semgrep scan --json --quiet --metrics=off --disable-version-check
 - Semgrep 测试全部使用 `FakeCommandRunner`，CI 不安装 Semgrep。覆盖严重度映射、
   抑制、越界路径、坏 JSON、超时、非零退出、缺可执行文件降级、缺配置、截断、
   去重、参数加固和 CLI 校验。
+- gitleaks 测试全部使用 fake runner + 临时报告文件，CI 不安装 gitleaks。覆盖命令加固
+  （`dir`、`--config`、`--gitleaks-ignore-path`、`--ignore-gitleaks-allow`、
+  `--exit-code 0`）、severity 映射、凭据脱敏（多行、已脱敏、短/缺失 secret）、
+  越界路径、坏 JSON / 缺报告 / 超限、去重、截断、缺失二进制降级、合并语义和 CLI 校验。
 - 结论测试覆盖 7.5 的每条分支。
 - CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码、`--sandbox` 参数组合。
 - 真实网络和真实 Docker 只用于手动验收，不进入默认 CI。
@@ -393,6 +446,7 @@ reuseguard check --idea "fast HTTP client with retries" --language Python --limi
 reuseguard check psf/requests --config examples/reuseguard.yaml
 reuseguard check psf/requests --no-recall --sandbox all
 reuseguard check psf/requests --no-recall --semgrep-config rules/
+reuseguard check psf/requests --no-recall --gitleaks
 ```
 
 ## 10. 里程碑
@@ -420,7 +474,11 @@ reuseguard check psf/requests --no-recall --semgrep-config rules/
     - `adapters/semgrep.py`：本地规则、JSON 解析、severity 映射、抑制、截断
     - `--semgrep-config` / `--semgrep-timeout`；缺可执行文件才降级到内置
     - 非零退出 / 坏 JSON / 超时 / 缺配置 → scan error，不静默降级
-  - 待办：OSV（lockfile）与 gitleaks（secret）适配器；统一 finding schema 扩展
+  - 已完成：gitleaks 适配器（追加式）
+    - `adapters/gitleaks.py`：`dir` 扫描、固定本地配置、ignore 路径隔离、凭据脱敏
+    - `--gitleaks` / `--gitleaks-timeout`；缺可执行文件才跳过
+    - `models.merge_scan_reports()`：多扫描器合并（最高风险、去重、最宽文件数）
+  - 待办：OSV（lockfile）适配器；外部规则 ID 进入 `rules.disable` / `rules.severity`
 - **M6（已完成）**：YAML 策略
   - `--config PATH`
   - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob
@@ -446,6 +504,10 @@ reuseguard check psf/requests --no-recall --semgrep-config rules/
 | Semgrep 规则 | 只接受本地路径 | 避免 `--config auto` 隐式联网和规则供应链风险 |
 | Semgrep 缺可选依赖 | 降级内置 + warning | 外部工具不可用不应中断整次评估 |
 | Semgrep 运行失败 | scan error，不静默降级 | 用户显式要求 Semgrep 时，静默换扫描器会掩盖覆盖缺口 |
+| gitleaks 模式 | 追加而不替换基础扫描 | 凭据与安装钩子/执行模式是不同证据，替换会缩小覆盖 |
+| gitleaks 配置 | 固定 `[extend] useDefault`，忽略仓库配置 | 否则被检查仓库可用 `.gitleaks.toml` / `.gitleaksignore` / `gitleaks:allow` 隐藏全部发现 |
+| gitleaks 证据 | 只保留脱敏片段 | 报告会被复制、贴进工单和 CI 日志 |
+| 多扫描器合并 | 最高风险 + 去重 + 最宽文件数 | 文件数相加会重复计数并夸大覆盖 |
 
 ## 12. 开放问题
 
@@ -463,6 +525,8 @@ reuseguard check psf/requests --no-recall --semgrep-config rules/
    是否需要在隔离副本中删除该文件，或直接传入显式文件列表？
 8. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
 9. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
+10. **gitleaks 自定义规则**：当前固定使用二进制内置规则并刻意忽略仓库配置；是否需要
+    `--gitleaks-config PATH`（同样必须是本地路径）让团队注入自己的 TOML？
 
 ## 13. 如何扩展
 
@@ -497,6 +561,8 @@ PatternRule(
 2. 把工具输出当作不可信数据，限制条数、路径必须落在快照内。
 3. 区分“工具不存在”（可降级）和“工具运行失败”（scan error，不静默降级）。
 4. 复用 `suppression_reason()`，并让截断 / 错误进入 `ScanReport.truncated`。
+5. 如果扫描器是**追加式**的（例如凭据、依赖漏洞），不要替换基础结果：返回自己的
+   `ScanReport`，由 pipeline 用 `merge_scan_reports()` 合并（参考 gitleaks）。
 
 ### 增加召回来源
 

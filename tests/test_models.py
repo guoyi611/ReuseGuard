@@ -13,6 +13,7 @@ from reuseguard.models import (
     Decision,
     FilterResult,
     FilterStatus,
+    Finding,
     RepoMeta,
     RepoRef,
     Report,
@@ -21,6 +22,7 @@ from reuseguard.models import (
     ScanStatus,
     Similarity,
     Verdict,
+    merge_scan_reports,
     to_jsonable,
 )
 
@@ -118,3 +120,104 @@ def _assessment(repo: RepoMeta, decision: Decision) -> Assessment:
         scan=ScanReport(status=ScanStatus.SCANNED),
         verdict=Verdict(decision=decision, confidence=Confidence.HIGH),
     )
+
+
+def _finding(
+    rule_id: str,
+    severity: RiskLevel,
+    *,
+    path: str = "app.py",
+    line: int = 1,
+    suppressed: bool = False,
+) -> Finding:
+    return Finding(
+        rule_id=rule_id,
+        title=rule_id,
+        severity=severity,
+        category="test",
+        path=path,
+        line=line,
+        message="test",
+        suppressed=suppressed,
+    )
+
+
+def _scanned(scanner: str, *findings: Finding, files: int = 10) -> ScanReport:
+    return ScanReport(
+        status=ScanStatus.SCANNED,
+        risk=RiskLevel.NONE,
+        findings=list(findings),
+        files_scanned=files,
+        bytes_scanned=1000,
+        scanner=scanner,
+    )
+
+
+def test_merge_scan_reports_combines_findings_and_keeps_the_highest_risk() -> None:
+    builtin = _scanned("builtin-patterns", _finding("py-eval-exec", RiskLevel.MEDIUM))
+    secrets = _scanned("gitleaks", _finding("gitleaks:aws-access-token", RiskLevel.HIGH, line=7))
+
+    merged = merge_scan_reports([builtin, secrets])
+
+    assert merged.status is ScanStatus.SCANNED
+    assert merged.scanner == "builtin-patterns+gitleaks"
+    assert merged.risk is RiskLevel.HIGH
+    assert {finding.rule_id for finding in merged.findings} == {
+        "py-eval-exec",
+        "gitleaks:aws-access-token",
+    }
+    # Coverage comes from the widest single scanner; summing would double count.
+    assert merged.files_scanned == 10
+    assert merged.bytes_scanned == 1000
+
+
+def test_merge_scan_reports_deduplicates_findings() -> None:
+    finding = _finding("py-eval-exec", RiskLevel.MEDIUM)
+    merged = merge_scan_reports([_scanned("a", finding), _scanned("b", finding)])
+
+    assert len(merged.findings) == 1
+
+
+def test_merge_scan_reports_marks_truncated_when_any_scanner_truncated() -> None:
+    clean = _scanned("builtin-patterns")
+    truncated = _scanned("gitleaks")
+    truncated.truncated = True
+
+    assert merge_scan_reports([clean, truncated]).truncated is True
+
+
+def test_merge_scan_reports_propagates_a_scanner_error() -> None:
+    builtin = _scanned("builtin-patterns", _finding("py-eval-exec", RiskLevel.MEDIUM))
+    failure = ScanReport(status=ScanStatus.ERROR, scanner="gitleaks", error="boom")
+
+    merged = merge_scan_reports([builtin, failure])
+
+    assert merged.status is ScanStatus.ERROR
+    assert "gitleaks: boom" in (merged.error or "")
+    # Surviving evidence is kept; it is the verdict that refuses to call it clean.
+    assert [finding.rule_id for finding in merged.findings] == ["py-eval-exec"]
+
+
+def test_merge_scan_reports_ignores_suppressed_findings_for_risk() -> None:
+    suppressed = _finding("gitleaks:private-key", RiskLevel.HIGH, suppressed=True)
+    merged = merge_scan_reports([_scanned("a"), _scanned("b", suppressed)])
+
+    assert merged.risk is RiskLevel.NONE
+
+
+def test_merge_scan_reports_returns_a_single_report_unchanged() -> None:
+    report = _scanned("builtin-patterns")
+
+    assert merge_scan_reports([report]) is report
+
+
+def test_merge_scan_reports_returns_first_report_when_nothing_scanned() -> None:
+    disabled = ScanReport(status=ScanStatus.DISABLED, error="off")
+    skipped = ScanReport(status=ScanStatus.SKIPPED, error="skip")
+
+    assert merge_scan_reports([disabled, skipped]) is disabled
+
+
+def test_merge_scan_reports_requires_at_least_one_report() -> None:
+    with pytest.raises(ValueError):
+        merge_scan_reports([])

@@ -116,6 +116,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="overall Semgrep process limit, 10-3600 (default: 300)",
     )
     check.add_argument(
+        "--gitleaks",
+        action="store_true",
+        help=(
+            "also scan the snapshot for hard-coded secrets with gitleaks, using the "
+            "rules built into that binary; results are added to the static scan"
+        ),
+    )
+    check.add_argument(
+        "--gitleaks-timeout",
+        type=_gitleaks_timeout,
+        default=None,
+        metavar="SECONDS",
+        help="overall gitleaks process limit, 10-3600 (default: 300)",
+    )
+    check.add_argument(
         "--sandbox",
         nargs="?",
         const="all",
@@ -318,6 +333,23 @@ def _run_check(args: argparse.Namespace) -> int:
                 "built-in scanner and record a warning."
             )
 
+    gitleaks_timeout = _pick(args.gitleaks_timeout, None, 300.0)
+    if args.gitleaks_timeout is not None and not args.gitleaks:
+        print("error: --gitleaks-timeout requires --gitleaks", file=sys.stderr)
+        return 2
+    if args.gitleaks:
+        if not enable_scan:
+            print(
+                "error: --gitleaks requires static scanning; remove --no-scan",
+                file=sys.stderr,
+            )
+            return 2
+        if not shutil.which("gitleaks"):
+            logger.warning(
+                "gitleaks was not found on PATH; secret scanning will be skipped and "
+                "a warning recorded."
+            )
+
     try:
         sandbox_limits = SandboxLimits(
             image=args.sandbox_image or DEFAULT_IMAGE,
@@ -369,6 +401,8 @@ def _run_check(args: argparse.Namespace) -> int:
         enable_scan=enable_scan,
         semgrep_config=str(args.semgrep_config) if args.semgrep_config else None,
         semgrep_timeout=semgrep_timeout,
+        enable_gitleaks=args.gitleaks,
+        gitleaks_timeout=gitleaks_timeout,
         sandbox_mode=sandbox_mode,
         sandbox_image=sandbox_limits.image,
         sandbox_timeout=sandbox_limits.timeout_seconds,
@@ -516,4 +550,11 @@ def _semgrep_timeout(value: str) -> float:
     parsed = _positive_float(value)
     if not 10.0 <= parsed <= 3600.0:
         raise argparse.ArgumentTypeError("semgrep timeout must be between 10 and 3600 seconds")
+    return parsed
+
+
+def _gitleaks_timeout(value: str) -> float:
+    parsed = _positive_float(value)
+    if not 10.0 <= parsed <= 3600.0:
+        raise argparse.ArgumentTypeError("gitleaks timeout must be between 10 and 3600 seconds")
     return parsed

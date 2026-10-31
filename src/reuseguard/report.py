@@ -478,6 +478,14 @@ def _render_run_details(report: Report) -> list[str]:
                 f"- Scanner: `semgrep`, config `{_code(semgrep_config, 240)}`, "
                 f"timeout {report.settings.get('semgrep_timeout', '?')}s"
             )
+        if report.settings.get("enable_gitleaks"):
+            max_file_kb = int(report.settings.get("max_file_kb") or 1024)
+            cap_mb = max(1, -(-max_file_kb // 1024))
+            lines.append(
+                f"- Secret scan: `gitleaks` (built-in rules), timeout "
+                f"{report.settings.get('gitleaks_timeout', '?')}s, "
+                f"files above {cap_mb} MB skipped"
+            )
     if report.recall_queries:
         lines.append("- Search queries:")
         for query in report.recall_queries:

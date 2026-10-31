@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -268,6 +269,63 @@ class ScanReport:
         if suppressed:
             detail += f", {suppressed} suppressed"
         return f"{self.risk.value} risk · {detail} · {self.files_scanned} files"
+
+
+def merge_scan_reports(reports: Sequence[ScanReport]) -> ScanReport:
+    """Combine additive scanner reports without over-claiming coverage.
+
+    Scanners observe different things (patterns, secrets, dependencies), so a
+    secret scan is *added* to the pattern scan instead of replacing it.
+
+    File counts use the widest single scanner, not a sum: summing would count the
+    same file once per scanner and overstate how much of the snapshot was read.
+    Any failing scanner makes the merged report an error, because silently
+    returning the surviving results would hide a coverage gap.
+    """
+    if not reports:
+        raise ValueError("at least one scan report is required")
+    if len(reports) == 1:
+        return reports[0]
+
+    scanned = [report for report in reports if report.status is ScanStatus.SCANNED]
+    if not scanned:
+        return reports[0]
+
+    findings: list[Finding] = []
+    seen: set[tuple[str, str, int]] = set()
+    for report in scanned:
+        for finding in report.findings:
+            key = (finding.rule_id, finding.path, finding.line or 0)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(finding)
+
+    risk = RiskLevel.NONE
+    for finding in findings:
+        if not finding.suppressed and finding.severity.rank > risk.rank:
+            risk = finding.severity
+
+    errors = [report for report in reports if report.status is ScanStatus.ERROR]
+    error = None
+    if errors:
+        detail = "; ".join(
+            f"{report.scanner}: {report.error or 'unknown error'}" for report in errors
+        )
+        error = f"one or more scanners failed: {detail}"
+
+    names = list(dict.fromkeys(report.scanner for report in reports if report.scanner))
+    return ScanReport(
+        status=ScanStatus.ERROR if errors else ScanStatus.SCANNED,
+        risk=risk,
+        findings=findings,
+        files_scanned=max(report.files_scanned for report in scanned),
+        files_skipped=max(report.files_skipped for report in scanned),
+        bytes_scanned=max(report.bytes_scanned for report in scanned),
+        truncated=any(report.truncated for report in reports),
+        scanner="+".join(names),
+        error=error,
+    )
 
 
 class SandboxStatus(str, Enum):

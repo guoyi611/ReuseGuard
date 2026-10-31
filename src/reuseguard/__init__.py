@@ -5,6 +5,6 @@ recall, reputation filtering, built-in or external static analysis, and opt-in
 container isolation checks into one graded report.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = ["__version__"]

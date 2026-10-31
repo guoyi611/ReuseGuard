@@ -31,18 +31,19 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.4.0 已经可用：
+v0.5.0 已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
 - 用 OpenSSF Scorecard 的公开数据做信誉过滤
 - 下载默认分支的只读快照，做静态风险扫描
 - 可选使用**本地** Semgrep 规则集做外部静态扫描（`--semgrep-config`）
+- 可选用本地 gitleaks 追加**凭据**扫描（`--gitleaks`），结果并入静态扫描
 - 可选地在容器里验证隔离配置（`--sandbox auto` / `--sandbox all`），默认关闭
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：OSV / gitleaks 适配、在沙箱内执行仓库行为（安装、导入、运行测试）。
+尚未实现：OSV（lockfile 漏洞）适配；在沙箱内执行仓库行为（安装、导入、运行测试）。
 沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。
 
 ## 工作流
@@ -222,6 +223,36 @@ reuseguard check psf/requests --semgrep-config rules/ --semgrep-timeout 120
 | `--semgrep-config PATH` | — | 本地规则文件或目录；开启 Semgrep 扫描 |
 | `--semgrep-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
 
+### 外部扫描器：gitleaks（凭据）
+
+硬编码凭据用 `--gitleaks` 开启。它是**追加**在内置扫描（或 Semgrep）之上的，不会替代已有的模式扫描：
+
+```powershell
+reuseguard check psf/requests --gitleaks
+reuseguard check psf/requests --semgrep-config rules/ --gitleaks --gitleaks-timeout 600
+```
+
+- 只调用本机 `gitleaks` 二进制，不联网；需要提供 `dir` 命令的版本（v8.19+）。
+- **不让被检查的仓库决定规则。** gitleaks 默认会读取快照里的 `.gitleaks.toml`（改写规则）、
+  `.gitleaksignore`（忽略发现）和 `# gitleaks:allow`（行内白名单），三者都能隐藏命中。
+  ReuseGuard 固定传入自己的最小配置（`[extend] useDefault = true`，即二进制内置规则），
+  把 ignore 路径指向一个空的私有目录，并加 `--ignore-gitleaks-allow`。
+- `--redact` 让工具先脱敏，ReuseGuard 再按 JSON 的 `Secret` 字段替换一次。报告里只有
+  `[REDACTED]`、规则、文件、行号和脱敏后的匹配行，**不写入凭据原文**。
+- severity：私钥和知名厂商 token（AWS / GCP / GitHub / Slack / Stripe 等）→ high；
+  `generic-*` 等熵规则 → medium。gitleaks 本身没有 severity 字段。
+- JSON 报告写在 ReuseGuard 的临时目录里，不写进快照，且读取有大小上限。
+- 找不到 gitleaks → 跳过凭据扫描并写 warning；运行失败或输出非法 → scan error，
+  **不会静默降级**。多个扫描器的结果会合并，`scanner` 显示为 `builtin-patterns+gitleaks`
+  这样的组合名。
+- gitleaks 不报告扫描文件数，合并报告沿用基础扫描器的计数；结论里会追加“只扫默认分支
+  快照、不扫 git 历史”的 caveat。
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `--gitleaks` | off | 追加 gitleaks 凭据扫描（内置规则） |
+| `--gitleaks-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
+
 ## 沙箱隔离检查（可选）
 
 v0.3 增加了一个**默认关闭**的容器隔离检查。它验证 ReuseGuard 的隔离配置是否按预期生效，**不在沙箱里执行仓库代码**：
@@ -260,6 +291,7 @@ ReuseGuard 自身也按“被检查的代码不可信”来设计：
 - **不跟随符号链接。** 扫描器只读普通文件，二进制文件跳过。
 - **沙箱是加固后的旁路。** 只有在显式开启时才调用 Docker；命令用 argv 列表拼装（`shell=False`），固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂 Docker socket，不用 `--privileged`，不自动拉镜像。
 - **外部扫描器只读本地规则。** Semgrep 用 `--semgrep-config PATH` 的本地规则，禁止 `--config auto`；关闭 metrics、版本检查和 gitignore 绕过，不执行仓库代码。
+- **gitleaks 不听仓库的配置。** 固定 `--config`（`[extend] useDefault = true`）防止快照内的 `.gitleaks.toml` 改写规则，`--gitleaks-ignore-path` 指向空目录，`--ignore-gitleaks-allow` 关闭行内白名单；报告只保留脱敏证据。
 - **只访问 GitHub 和 OpenSSF Scorecard。** 不把仓库内容上传给 LLM 或其他第三方。
 - **token 不落盘。** 只从环境变量或 `gh auth token` 读取，不写入报告，不打印。
 - **不在报告里渲染原始 HTML。** 仓库描述等用户可控文本会做 HTML 转义。
@@ -321,6 +353,8 @@ reuseguard --version
 | `--no-scan` | off | 关闭快照下载和静态扫描 |
 | `--semgrep-config PATH` | — | 用本地 Semgrep 规则文件/目录扫描；绝不使用 `--config auto` |
 | `--semgrep-timeout SECONDS` | 300 | Semgrep 整体进程上限（10–3600） |
+| `--gitleaks` | off | 追加 gitleaks 凭据扫描；不用快照内的 `.gitleaks.toml` / `.gitleaksignore` |
+| `--gitleaks-timeout SECONDS` | 300 | gitleaks 整体进程上限（10–3600） |
 | `--sandbox [MODE]` | off | 容器隔离检查：`auto` 只跑 high/critical，`all` 或裸参数跑全部，`off` 关闭 |
 | `--sandbox-image IMAGE` | python:3.11-slim | 沙箱镜像；必须已在本地，不会自动 pull |
 | `--sandbox-timeout SECONDS` | 20 | 单次沙箱运行上限（1–600），超时杀容器 |
@@ -349,6 +383,7 @@ reuseguard --version
 - v0.3 的沙箱只验证容器隔离配置，不执行仓库代码；它不能替代行为分析或人工审计。
 - 沙箱需要本机 Docker 守护进程和预拉取的镜像；不可用时只记 warning，不改变结论。
 - Semgrep 的覆盖范围完全取决于你提供的规则集；ReuseGuard 不内置或联网获取规则。
+- gitleaks 只扫描默认分支快照，不覆盖 git 历史；漏报取决于其内置规则，没有命中不等于没有凭据。
 
 ## 开发
 
@@ -370,7 +405,8 @@ ruff format --check src tests
   加固容器命令、隔离探测、`--sandbox` 触发、报告区块、fake runner 测试），
   待做“在沙箱内执行仓库行为”
 - **M5（进行中）**：可插拔外部扫描器。已完成 Semgrep 适配器（本地规则、JSON
-  解析、统一 `Finding`、降级与错误边界）；OSV（lockfile）和 gitleaks（secret）待做
+  解析、统一 `Finding`、降级与错误边界）和 gitleaks 适配器（`--gitleaks`、
+  固定本地配置、凭据脱敏、与基础扫描合并）；OSV（lockfile）待做
 - **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
 
 设计取舍和阶段规则见 [project.md](project.md)。

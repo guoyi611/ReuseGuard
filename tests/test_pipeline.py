@@ -581,3 +581,160 @@ def test_semgrep_missing_config_is_a_scan_error(tmp_path: Path) -> None:
     assessment = report.assessments[0]
     assert assessment.scan.status is ScanStatus.ERROR
     assert "config path does not exist" in (assessment.scan.error or "")
+
+
+# --- gitleaks integration ---------------------------------------------------
+
+
+def _gitleaks_payload(path: str = "config.py") -> str:
+    return json.dumps(
+        [
+            {
+                "RuleID": "aws-access-token",
+                "Description": "AWS Access Token",
+                "StartLine": 2,
+                "Match": "key = AKIAIOSFODNN7EXAMPLE",
+                "Secret": "AKIAIOSFODNN7EXAMPLE",
+                "File": path,
+                "Tags": [],
+            }
+        ]
+    )
+
+
+class _GitleaksRunner:
+    """Fake gitleaks runner: writes the JSON report the adapter expects."""
+
+    def __init__(self, payload: str | None = None, result: CommandResult | None = None) -> None:
+        self.payload = payload
+        self.result = result
+        self.calls: list[tuple[tuple[str, ...], float]] = []
+
+    def __call__(self, argv, *, timeout: float) -> CommandResult:
+        recorded = tuple(argv)
+        self.calls.append((recorded, timeout))
+        if self.payload is not None:
+            report_path = recorded[recorded.index("--report-path") + 1]
+            Path(report_path).write_text(self.payload, encoding="utf-8")
+        return self.result or CommandResult(argv=recorded, returncode=0)
+
+
+def test_gitleaks_is_additive_to_the_builtin_scanner() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _GitleaksRunner(_gitleaks_payload())
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_gitleaks=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(
+            {"app.py": "def get(url):\n    return url\n", "config.py": "key = x\n"}
+        ),
+        gitleaks_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.SCANNED
+    assert assessment.scan.scanner == "builtin-patterns+gitleaks"
+    assert assessment.scan.risk is RiskLevel.HIGH
+    # The built-in scanner still provides the file count for the merged report.
+    assert assessment.scan.files_scanned == 2
+    assert assessment.verdict.decision is Decision.AVOID
+    assert any("git history" in item for item in assessment.verdict.limitations)
+    assert runner.calls[0][0][:2] == ("gitleaks", "dir")
+
+
+def test_gitleaks_disabled_by_default_never_runs() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _GitleaksRunner(_gitleaks_payload())
+
+    report = Pipeline(
+        Settings(max_candidates=0),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        gitleaks_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assert runner.calls == []
+    assert report.assessments[0].scan.scanner == "builtin-patterns"
+
+
+def test_gitleaks_missing_binary_warns_and_keeps_builtin() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _GitleaksRunner(
+        result=CommandResult(argv=(), returncode=None, stderr="executable not found")
+    )
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_gitleaks=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        gitleaks_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.SCANNED
+    assert assessment.scan.scanner == "builtin-patterns"
+    assert any("gitleaks is unavailable" in warning for warning in report.warnings)
+
+
+def test_gitleaks_failure_is_a_scan_error_not_a_silent_fallback() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _GitleaksRunner(result=CommandResult(argv=(), returncode=1, stderr="bad config"))
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_gitleaks=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        gitleaks_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.ERROR
+    assert assessment.scan.scanner == "builtin-patterns+gitleaks"
+    assert "bad config" in (assessment.scan.error or "")
+    assert assessment.verdict.decision is Decision.INSPECT
+
+
+def test_gitleaks_runs_alongside_semgrep(tmp_path: Path) -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    semgrep_runner = FakeCommandRunner(
+        [CommandResult(argv=(), returncode=0, stdout=_semgrep_output(severity="WARNING"))]
+    )
+    gitleaks_runner = _GitleaksRunner(_gitleaks_payload())
+
+    report = Pipeline(
+        Settings(
+            max_candidates=0,
+            semgrep_config=str(_semgrep_config(tmp_path)),
+            enable_gitleaks=True,
+        ),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(
+            {"app.py": "eval(user_input)\n", "config.py": "key = x\n"}
+        ),
+        semgrep_runner=semgrep_runner,
+        gitleaks_runner=gitleaks_runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.scanner == "semgrep+gitleaks"
+    assert {finding.rule_id for finding in assessment.scan.findings} == {
+        "python.lang.security.audit.eval",
+        "gitleaks:aws-access-token",
+    }
+    assert assessment.scan.risk is RiskLevel.HIGH

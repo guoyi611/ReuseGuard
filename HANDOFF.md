@@ -3,9 +3,9 @@
 > 最后更新：2026-10-31
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
-> 当前版本：`0.4.0`
+> 当前版本：`0.5.0`
 > 基线提交：`c711b42 feat: add local-only Semgrep scanner adapter`（M5 第一步；
-> M4 基线为 `f39c84b`）
+> 本次会话在此基线上新增 gitleaks 适配器，M4 基线为 `f39c84b`）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -35,11 +35,11 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M2 | 完成 | JSON、`--fail-on`、误报抑制、离线 demo、测试、CI、打包 |
 | M3 | 完成 | `--idea` 自然语言输入、关键词召回与排序、`Report.seed=None` |
 | M4 | **进行中（骨架完成）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；**不在沙箱内执行仓库代码**，真实 Docker 冒烟待做 |
-| M5 | **进行中** | Semgrep 适配器完成（本地规则、JSON 解析、统一 Finding、降级/错误边界）；OSV、gitleaks 待做 |
+| M5 | **进行中（2/3）** | Semgrep 适配器完成（本地规则、JSON 解析、统一 Finding、降级/错误边界）；gitleaks 适配器完成（追加式凭据扫描、固定本地配置、脱敏）；OSV 待做 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**237 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script（0.4.0 待重建验证）。
+当前测试：**298 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script（0.5.0 待重建验证）。
 
 ## 3. 代码地图
 
@@ -58,6 +58,7 @@ src/reuseguard/
 │   ├── scanner.py      # 内置规则、KNOWN_RULE_IDS、suppression_reason()
 │   ├── process.py      # 共享 argv 子进程边界（shell=False + 超时）
 │   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
+│   ├── gitleaks.py     # gitleaks JSON → 统一 ScanReport（凭据脱敏）
 │   └── sandbox.py      # Docker 检测 + 加固 docker run + 隔离探测
 └── stages/
     ├── recall.py       # seed 召回 + idea 召回 + 相似度
@@ -81,6 +82,7 @@ tests/
 ├── test_sandbox.py
 ├── test_scanner.py
 ├── test_semgrep.py
+├── test_gitleaks.py
 ├── test_snapshot.py
 └── test_verdict.py
 ```
@@ -183,6 +185,52 @@ tests/
 - Semgrep 仍可能读取仓库内 `.semgrepignore`，可能缩小覆盖范围（已记入开放问题）。
 - 没有在 CI 里跑真实 Semgrep；只在 fake runner 层验证命令与解析。
 
+## 4.3 本会话 M5 第二步：gitleaks 适配器
+
+新增 `src/reuseguard/adapters/gitleaks.py`、`models.merge_scan_reports()`，并接入
+config / CLI / pipeline / report / verdict：
+
+- `gitleaks dir <root>`（**需要 v8.19+**；`detect --no-git` 已弃用，不使用）。固定
+  `--report-format json --report-path <tmp>/report.json --exit-code 0 --redact
+  --no-banner --no-color --ignore-gitleaks-allow --max-target-megabytes N
+  --gitleaks-ignore-path <tmp> --config <tmp>/reuseguard-gitleaks.toml`。
+- **仓库不能决定规则**：gitleaks 默认会读快照里的 `.gitleaks.toml`（可整体 allowlist）、
+  `.gitleaksignore` 和 `# gitleaks:allow`。适配器写一个最小配置
+  `[extend] useDefault = true` 并用 `--config` 固定；ignore 路径指向空的私有目录；
+  `--ignore-gitleaks-allow` 关掉行内白名单。
+- 报告写私有临时目录（不写快照），读取上限 16 MB（`MAX_REPORT_BYTES`），JSON 允许
+  顶层数组、`null`、以及 `{"leaks": [...]}` 三种形状。
+- **凭据脱敏**：工具先 `--redact`，适配器再从 `Secret` 字段替换一次；`Finding.evidence`
+  只保留单行脱敏片段。secret 缺失或 < 4 字符时直接不给 evidence（避免部分泄露）。
+  `Secret` 原文不进入任何 `Finding` 字段，测试用 `to_jsonable(report)` 断言原文不出现。
+- severity 映射（gitleaks 没有 severity）：私钥 + 知名厂商（aws/gcp/github/gitlab/
+  slack/stripe/twilio/npm/pypi/jwt…）→ high；`generic-*` 与未知规则 → medium。
+- `rule_id` 加 `gitleaks:` 前缀（如 `gitleaks:aws-access-token`），避免与内置规则
+  同名；`disabled_rules` / `severity_overrides` 同时接受带前缀和不带前缀的 ID。
+- 复用 `suppression_reason()` 与 `ScanLimits`；命中超限 → `truncated=True`。
+- **追加而非替换**：pipeline 先跑内置（或 Semgrep），再跑 gitleaks，最后
+  `merge_scan_reports()`：取最高 risk、按 `(rule_id, path, line)` 去重、`files_scanned`
+  取最宽而不是相加（gitleaks 不报告文件数）。
+- 失败语义：可执行文件缺失 → `GitleaksUnavailable` → 跳过 + warning；超时/非零退出/
+  126/坏 JSON/报告缺失或过大 → `ScanReport(status=ERROR, scanner="gitleaks")`，
+  合并后整份 scan 为 ERROR，结论 INSPECT，**不静默降级**。
+- CLI：`--gitleaks`、`--gitleaks-timeout`（10–3600，默认 300）；不能与 `--no-scan` 同用；
+  timeout 不能单独使用；gitleaks 不在 PATH → warning。
+- 版本：0.5.0。测试：`tests/test_gitleaks.py` 36 个 + models 合并 8 个 + pipeline 5 个
+  + CLI 5 个，全部 fake runner / 临时目录，CI 不安装 gitleaks。
+
+诚实边界：
+
+- 只扫默认分支快照，不扫 git 历史；`containment` 那套 caveat 不适用于它，但结论里会写
+  “没发现凭据 ≠ 从未提交过凭据”。
+- 没有真实 gitleaks 二进制验收（本机未安装、也没联网下载）；命令与解析只在 fake
+  runner 层验证。首次真实运行时重点确认 `dir` 命令、`[extend] useDefault`、
+  `--gitleaks-ignore-path` 指向空目录不报错。
+- gitleaks 不报告扫描文件数，合并报告沿用基础扫描器的 `files_scanned`；如果将来让
+  gitleaks 单独出报告，`files_scanned == 0` 会触发 INSPECT。
+- 外部规则 ID 还不能写进 YAML 的 `rules.disable` / `rules.severity`（配置校验只认
+  `KNOWN_RULE_IDS`）；目前只有程序内调用能覆盖 gitleaks 规则。
+
 ## 5. 如何运行
 
 ```powershell
@@ -198,6 +246,8 @@ reuseguard check psf/requests --no-recall --sandbox all
 reuseguard check psf/requests --no-recall --sandbox auto --sandbox-timeout 30
 reuseguard check psf/requests --no-recall --semgrep-config rules/semgrep.yaml
 reuseguard check psf/requests --no-recall --semgrep-config rules/ --semgrep-timeout 120
+reuseguard check psf/requests --no-recall --gitleaks
+reuseguard check psf/requests --no-recall --semgrep-config rules/ --gitleaks --gitleaks-timeout 600
 ```
 
 需要 token 时：
@@ -229,6 +279,9 @@ python -m build
   且扫描完整 → USE。
 - **沙箱默认关闭且不执行仓库代码**：只验证容器隔离配置；Docker 不可用只降级为
   warning + `UNAVAILABLE`，不改变结论。`containment_ok=True` 不是“无害证明”。
+- **外部扫描器分级接入**：Semgrep 替换内置扫描（用户显式给规则集）；gitleaks 追加到
+  基础扫描之后（凭据与模式是不同证据）。gitleaks 固定本地配置，仓库内的
+  `.gitleaks.toml` / `.gitleaksignore` / `gitleaks:allow` 一律不生效；报告只留脱敏证据。
 
 ## 7. 已知问题 / 雷区
 
@@ -263,6 +316,14 @@ python -m build
    - Windows / Docker Desktop 的 bind mount 权限语义与 Linux 不同，需要在目标平台
      单独冒烟。
    - 超时只保证杀掉容器；宿主机 Docker daemon 卡死时 `docker rm -f` 也可能超时。
+
+8. **gitleaks 需要 `dir` 命令（v8.19+）**：更老的版本以退出码 126 失败，适配器记为
+   scan error，不会静默降级。**还没有真实 gitleaks 验收**（本机未安装、也未联网下载）；
+   首次真跑时确认 `dir`、`[extend] useDefault`、`--gitleaks-ignore-path` 指向空目录
+   这三处。若空目录会报错，改成传一个显式的空 `.gitleaksignore` 文件路径。
+
+9. **Python 包没有装进 `.venv`**：本会话用 `$env:PYTHONPATH="src"` 跑 pytest，ruff 用
+   `.tools\bin\ruff.exe`。直接 `python -m pytest` 会 `ModuleNotFoundError`。
 
 ## 8. 下一步建议：M4 收尾 / 行为探测
 
@@ -300,38 +361,55 @@ python -m build
 
 ## 9. 下一步建议：M5 剩余扫描器
 
-Semgrep 已完成（见 4.2）。接下来按难度：
+Semgrep（见 4.2）与 gitleaks（见 4.3）已完成。只剩 OSV。
 
-### 9.1 gitleaks（建议先做）
+### 9.1 ~~gitleaks~~（已完成，见 4.3）
 
-- 本地可执行文件，JSON 输出稳定；`gitleaks detect --no-git --source <root>
-  --report-format json --report-path -`。
-- 重点：`--no-git`（快照没有 `.git`）、关闭远端配置、明确超时。
-- 解析 `leaks` 数组：`RuleID`、`File`、`StartLine`、`Description`、`Match`、
-  `Secret`。**不要把 `Secret` 原文写进报告**，只保留脱敏后的证据。
-- severity：gitleaks 没有 severity，按规则 ID 映射（私钥/token → high，其他 → medium）。
-- 可执行文件缺失 → 降级内置 + warning；运行失败/坏 JSON → scan error。
-- 全部用 fake runner 测试，CI 不安装 gitleaks。
+原计划有两处要修正，记下来避免下次重犯：
 
-### 9.2 OSV（lockfile）
+- `--report-path -`（stdout）**不是** gitleaks 文档化的行为；报告是写文件的。适配器改成
+  写私有临时目录再读，并限制大小。
+- `gitleaks detect --no-git` 从 v8.19 起已弃用；应使用 `gitleaks dir <root>`。
+- 只做 `--no-git` 不够：仓库内的 `.gitleaks.toml` / `.gitleaksignore` / `gitleaks:allow`
+  都能隐藏发现，必须用固定 `--config` + 空 ignore 目录 + `--ignore-gitleaks-allow` 关掉。
 
-- 两种实现路径，需先定：
-  1. `osv-scanner --lockfile <path> --format json`（外部二进制，和 Semgrep/gitleaks 一致）
-  2. 直接调 `https://api.osv.dev/v1/querybatch`（需要网络、httpx、可注入 client）
-- 不管哪条路，都需要先识别 lockfile：`requirements.txt`、`poetry.lock`、
-  `package-lock.json`、`go.mod`、`Cargo.lock`、`Gemfile.lock` 等。
-- 网络路径必须考虑离线测试：用 fake HTTP client，不访问真实 OSV。
-- 漏洞 finding 的 severity 来自 OSV `database_specific.severity` 或 CVSS；
-  缺失时保守为 medium，不要默认 high。
-- 统一 `Finding`：`rule_id` 用 OSV ID（如 `GHSA-...` / `CVE-...`），
-  `category="dependency"`，`path=lockfile`，`line` 可空。
+### 9.2 OSV（lockfile）——下一步
 
-### 9.3 通用约束（沿用 Semgrep）
+**先做决定：用 `osv-scanner` 二进制，不要自己调 HTTP API。** 理由：
 
-- 场景：`--gitleaks` / `--osv` CLI 开关，默认关闭；`--no-scan` 时禁用。
-- 组合多个扫描器时，`ScanReport` 需要合并 findings、取最高 risk、保留 scanner 列表；
-  这可能要扩展 `ScanReport.scanner` 为可读字符串（如 `semgrep+gitleaks`）。
-- 不要把“扫描器没报”写成安全；报告 limitations 必须写覆盖范围。
+1. `/v1/querybatch` 接收的是“包名 + 版本”列表，不是 lockfile。走 HTTP 就等于自己实现
+   npm / pip / poetry / go / cargo / gem 的 lockfile 解析器，工作量和漏解析风险都远大于
+   适配一个现成工具。
+2. 和 Semgrep / gitleaks 保持同一个边界：argv 列表、`shell=False`、显式超时、
+   `CommandRunner` 注入、fake runner 测试。
+3. 失败语义可以复用：可执行文件缺失 → 跳过 + warning；运行失败 / 坏 JSON → scan error。
+
+要提前想清楚的几件事：
+
+- **网络边界会变**：`osv-scanner` 自己会访问 `api.osv.dev`。这打破 project.md 里“只访问
+  GitHub / Scorecard”的表述，必须更新安全模型与 README。若要离线，需要本地 OSV 数据库，
+  可以作为后续开关。
+- **退出码**：osv-scanner 发现漏洞时会返回非零；和 gitleaks 一样要显式压成 0（先查当前
+  版本的 flag），否则每个有漏洞的仓库都会被当成 scan error。
+- **lockfile 发现**：让工具自己递归找（例如 `--recursive <root>`），不要自己遍历后再传
+  一堆路径。注意它会扫进 `node_modules` / vendored 目录，需要和内置扫描器的排除策略对齐。
+- **severity**：从 `database_specific.severity` 或 CVSS 取；缺失时保守为 medium，
+  **不要默认 high**。
+- **Finding 映射**：`rule_id` 用 OSV ID（`GHSA-...` / `CVE-...`，可加 `osv:` 前缀）；
+  `category="dependency"`；`path=lockfile`；`line` 可空；`evidence` 只放包名 + 版本 +
+  advisory 链接，不要把整条 advisory 塞进报告。
+- **追加式合并**：漏洞和模式/凭据是不同证据，用 `merge_scan_reports()` 追加，不要替换。
+- **测试**：全部 fake runner；准备 `package-lock.json` / `requirements.txt` 样本，但
+  **不要在 CI 里装 osv-scanner**，也不要真的联网。
+
+### 9.3 通用约束（部分已落地）
+
+- 场景：`--gitleaks` / `--osv` CLI 开关，默认关闭；`--no-scan` 时禁用。（gitleaks 已做）
+- 组合多个扫描器：`merge_scan_reports()` 已实现——取最高 risk、按 `(rule_id, path, line)`
+  去重、`scanner` 拼接为 `a+b`、文件数取最宽而不是相加、任一 scanner 出错则整份 ERROR。
+- 外部规则 ID 还不能进 YAML 的 `rules.disable` / `rules.severity`：配置校验只认
+  `KNOWN_RULE_IDS`。要支持就得给 policy 加“外部规则前缀”白名单，不要直接放开任意字符串。
+- 不要把“扫描器没报”写成安全；报告 / verdict limitations 必须写覆盖范围。
 - 每个扫描器单独 commit，补测试 + 跑 pytest/ruff + 更新三份文档。
 
 ## 10. 新对话提示词
@@ -346,20 +424,24 @@ Semgrep 已完成（见 4.2）。接下来按难度：
 - git log --oneline -5
 - python -m pytest
 - ruff check src tests
-确认基线（main，v0.4.0，237 个测试通过）后再动手。
+确认基线（main，v0.5.0，298 个测试通过）后再动手。注意：当前 .venv 里没有安装本包，
+需要用 $env:PYTHONPATH="src" 跑 pytest，ruff 用 .tools\bin\ruff.exe。
 
 已完成的里程碑：M1、M2、M3（--idea）、M4 安全骨架（默认关闭的容器隔离探测）、
-M5 第一步（Semgrep 适配器：本地规则、统一 Finding、降级/错误边界）、M6（YAML 策略）。
-未完成：M5 剩余（gitleaks、OSV）、M4 行为探测（在沙箱内执行安装/导入/测试）、
-真实 Docker 冒烟验收。
+M5 前两步（Semgrep 适配器；gitleaks 适配器：追加式凭据扫描、固定本地配置、脱敏）、
+M6（YAML 策略）。未完成：M5 剩余的 OSV（lockfile）、M4 行为探测（在沙箱内执行
+安装/导入/测试）、真实 Docker 冒烟验收。
 
 请按 HANDOFF.md 第 9 节的顺序继续：
-1. 先做 gitleaks 适配器（--no-git、JSON 解析、Secret 脱敏、fake runner 测试）。
-2. 再做 OSV lockfile 适配器（先决定 osv-scanner 二进制还是 HTTP API）。
-3. 每个扫描器单独 commit，补测试 + pytest + ruff + 更新三份文档 + push。
+1. 做 OSV lockfile 适配器：按 9.2 的结论用 osv-scanner 二进制，不要自己解析 lockfile；
+   先确认退出码语义和网络边界，再写适配器 + fake runner 测试。
+2. 每个扫描器单独 commit，补测试 + pytest + ruff + 更新三份文档 + push。
+3. 有余力再做真实 gitleaks / Docker 冒烟验收，并记录实际命令与输出。
 
 不要把被检查代码在宿主机上执行，也不要在沙箱里执行仓库代码，除非先完成独立的
 探针协议与证据边界设计。不要用 `--config auto` 或任何会隐式联网拉规则的路径。
+gitleaks 的经验：工具默认会读仓库内的配置文件/忽略文件，接入任何新扫描器时都要先问
+“被检查的仓库能不能用它自己的配置让扫描器闭嘴”。
 
 每完成一个可验证的小步：
 - 补测试

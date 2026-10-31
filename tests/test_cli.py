@@ -298,3 +298,66 @@ def test_semgrep_settings_are_forwarded_to_the_pipeline(
     settings = captured["settings"]
     assert settings.semgrep_config == str(config)
     assert settings.semgrep_timeout == 120.0
+
+
+# --- gitleaks ---------------------------------------------------------------
+
+
+def test_gitleaks_timeout_requires_gitleaks(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--gitleaks-timeout", "60"])
+
+    assert code == 2
+    assert "requires --gitleaks" in capsys.readouterr().err
+
+
+def test_gitleaks_requires_static_scanning(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--gitleaks", "--no-scan"])
+
+    assert code == 2
+    assert "requires static scanning" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["5", "4000"])
+def test_gitleaks_timeout_must_be_in_range(value: str) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["check", "acme/seed", "--gitleaks", "--gitleaks-timeout", value])
+
+    assert excinfo.value.code == 2
+
+
+def test_gitleaks_settings_are_forwarded_to_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "gitleaks.md"
+    report = build_demo_report()
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return report
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--gitleaks",
+            "--gitleaks-timeout",
+            "120",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.enable_gitleaks is True
+    assert settings.gitleaks_timeout == 120.0

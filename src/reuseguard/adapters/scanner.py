@@ -785,6 +785,28 @@ def _is_vscode_tasks(relative: str) -> bool:
     return len(parts) >= 2 and parts[-2] == ".vscode" and parts[-1] == "tasks.json"
 
 
+def relative_to_root(raw: object, root: Path) -> str | None:
+    """Normalize a scanner-reported path and require it to stay inside ``root``.
+
+    External scanners report paths in their own way: relative to the scan target,
+    absolute, or (for archive members) with ``!`` separators. Anything that
+    resolves outside the snapshot is dropped rather than rendered into a report.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
 def suppression_reason(relative: str, suppress_globs: tuple[str, ...] = ()) -> str | None:
     """Public wrapper for the built-in false-positive suppression policy.
 

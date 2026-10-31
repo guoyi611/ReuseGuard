@@ -22,6 +22,12 @@ import httpx
 
 from . import __version__
 from .adapters.github import GitHubClient
+from .adapters.gitleaks import (
+    GitleaksError,
+    GitleaksOptions,
+    GitleaksScanner,
+    GitleaksUnavailable,
+)
 from .adapters.sandbox import (
     CommandRunner,
     DockerStatus,
@@ -54,6 +60,7 @@ from .models import (
     SandboxStatus,
     ScanReport,
     ScanStatus,
+    merge_scan_reports,
 )
 from .stages.recall import recall_idea, recall_similar
 from .stages.reputation import evaluate_reputation
@@ -77,6 +84,7 @@ class Pipeline:
         sandbox_runner: CommandRunner = run_command,
         sandbox_detect: Callable[..., DockerStatus] = detect_docker,
         semgrep_runner: CommandRunner = run_command,
+        gitleaks_runner: CommandRunner = run_command,
     ) -> None:
         self.settings = settings
         self.github = github
@@ -87,6 +95,7 @@ class Pipeline:
         self._sandbox_runner = sandbox_runner
         self._sandbox_detect = sandbox_detect
         self._semgrep_runner = semgrep_runner
+        self._gitleaks_runner = gitleaks_runner
 
     def run(self, seed_ref: RepoRef) -> Report:
         started = time.monotonic()
@@ -306,6 +315,8 @@ class Pipeline:
             max_total_bytes=self.settings.max_scan_mb * 1024 * 1024,
         )
 
+        scans: list[ScanReport] = []
+
         if self.settings.semgrep_config:
             try:
                 scanner = SemgrepScanner(
@@ -323,7 +334,6 @@ class Pipeline:
                     severity_overrides=self.settings.severity_overrides,
                     suppress_globs=self.settings.suppress_paths,
                 )
-                return semgrep_scan, snapshot.root
             except SemgrepUnavailable as exc:
                 logger.warning("  semgrep unavailable: %s", exc)
                 warnings.append(
@@ -336,19 +346,62 @@ class Pipeline:
                     ScanReport(status=ScanStatus.ERROR, scanner="semgrep", error=str(exc)),
                     snapshot.root,
                 )
+            else:
+                scans.append(semgrep_scan)
 
-        try:
-            scan = self._scan_fn(
-                snapshot.root,
-                limits=limits,
-                disabled_rules=self.settings.disabled_rules,
-                severity_overrides=self.settings.severity_overrides,
-                suppress_globs=self.settings.suppress_paths,
-            )
-        except Exception as exc:  # noqa: BLE001 - a scanner bug must not crash the run
-            logger.debug("scanner failed for %s", repo.full_name, exc_info=True)
-            return ScanReport(status=ScanStatus.ERROR, error=f"scanner failed: {exc}"), None
-        return scan, snapshot.root
+        if not scans:
+            try:
+                scan = self._scan_fn(
+                    snapshot.root,
+                    limits=limits,
+                    disabled_rules=self.settings.disabled_rules,
+                    severity_overrides=self.settings.severity_overrides,
+                    suppress_globs=self.settings.suppress_paths,
+                )
+            except Exception as exc:  # noqa: BLE001 - a scanner bug must not crash the run
+                logger.debug("scanner failed for %s", repo.full_name, exc_info=True)
+                return ScanReport(status=ScanStatus.ERROR, error=f"scanner failed: {exc}"), None
+            scans.append(scan)
+
+        if self.settings.enable_gitleaks:
+            # Secret scanning is additive: it never replaces the scanner above,
+            # because secrets and install hooks are different evidence.
+            try:
+                gitleaks = GitleaksScanner(
+                    GitleaksOptions(process_timeout=self.settings.gitleaks_timeout),
+                    runner=self._gitleaks_runner,
+                )
+                scans.append(
+                    gitleaks.scan(
+                        snapshot.root,
+                        limits=limits,
+                        disabled_rules=self.settings.disabled_rules,
+                        severity_overrides=self.settings.severity_overrides,
+                        suppress_globs=self.settings.suppress_paths,
+                    )
+                )
+            except GitleaksUnavailable as exc:
+                logger.warning("  gitleaks unavailable: %s", exc)
+                warnings.append(
+                    f"{repo.full_name}: gitleaks is unavailable ({exc}); "
+                    "secret scanning was skipped."
+                )
+            except GitleaksError as exc:
+                logger.warning("  gitleaks failed: %s", exc)
+                scans.append(
+                    ScanReport(status=ScanStatus.ERROR, scanner="gitleaks", error=str(exc))
+                )
+            except Exception as exc:  # noqa: BLE001 - a scanner bug must not crash the run
+                logger.debug("gitleaks failed for %s", repo.full_name, exc_info=True)
+                scans.append(
+                    ScanReport(
+                        status=ScanStatus.ERROR,
+                        scanner="gitleaks",
+                        error=f"gitleaks failed: {exc}",
+                    )
+                )
+
+        return merge_scan_reports(scans), snapshot.root
 
     def _maybe_sandbox(
         self,

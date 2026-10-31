@@ -151,10 +151,11 @@ def decide(
             decision=Decision.INSPECT,
             confidence=Confidence.MEDIUM,
             reasons=[
-                "The static scan hit a file or size limit, so coverage is incomplete.",
+                "The scan reported incomplete coverage, so some files or dependencies "
+                "were not checked.",
                 *reasons,
             ],
-            limitations=[*base_limitations, "Some files were not scanned."],
+            limitations=[*base_limitations, "Coverage was incomplete; see the scan section."],
         )
 
     if filter_result.status is FilterStatus.DISABLED:
@@ -256,5 +257,11 @@ def _scanner_limitations(scan: ScanReport) -> list[str]:
             "Secret scanning ran gitleaks' built-in rules over the default-branch snapshot; "
             "it did not inspect git history, releases, or runtime configuration, and a clean "
             "result is not evidence that no credential was ever committed."
+        )
+    if "osv" in scanners:
+        limitations.append(
+            "Dependency scanning only covers lockfiles found in the snapshot; packages "
+            "resolved at install time, missing from a lockfile, or unpublished are not "
+            "checked. A reported vulnerability is often fixable by upgrading."
         )
     return limitations

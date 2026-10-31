@@ -28,6 +28,12 @@ from .adapters.gitleaks import (
     GitleaksScanner,
     GitleaksUnavailable,
 )
+from .adapters.osv import (
+    OsvError,
+    OsvOptions,
+    OsvScanner,
+    OsvUnavailable,
+)
 from .adapters.sandbox import (
     CommandRunner,
     DockerStatus,
@@ -85,6 +91,7 @@ class Pipeline:
         sandbox_detect: Callable[..., DockerStatus] = detect_docker,
         semgrep_runner: CommandRunner = run_command,
         gitleaks_runner: CommandRunner = run_command,
+        osv_runner: CommandRunner = run_command,
     ) -> None:
         self.settings = settings
         self.github = github
@@ -96,6 +103,7 @@ class Pipeline:
         self._sandbox_detect = sandbox_detect
         self._semgrep_runner = semgrep_runner
         self._gitleaks_runner = gitleaks_runner
+        self._osv_runner = osv_runner
 
     def run(self, seed_ref: RepoRef) -> Report:
         started = time.monotonic()
@@ -398,6 +406,47 @@ class Pipeline:
                         status=ScanStatus.ERROR,
                         scanner="gitleaks",
                         error=f"gitleaks failed: {exc}",
+                    )
+                )
+
+        if self.settings.enable_osv:
+            # Dependency scanning is additive as well: a vulnerable package and a
+            # dangerous pattern are different evidence about the same snapshot.
+            try:
+                osv = OsvScanner(
+                    OsvOptions(process_timeout=self.settings.osv_timeout),
+                    runner=self._osv_runner,
+                )
+                osv_scan = osv.scan(
+                    snapshot.root,
+                    limits=limits,
+                    disabled_rules=self.settings.disabled_rules,
+                    severity_overrides=self.settings.severity_overrides,
+                    suppress_globs=self.settings.suppress_paths,
+                )
+                scans.append(osv_scan)
+                if osv_scan.truncated and not osv_scan.findings:
+                    # osv-scanner found no lockfile or other package source.
+                    warnings.append(
+                        f"{repo.full_name}: osv-scanner found no lockfile or package "
+                        "source; dependency coverage is empty."
+                    )
+            except OsvUnavailable as exc:
+                logger.warning("  osv-scanner unavailable: %s", exc)
+                warnings.append(
+                    f"{repo.full_name}: osv-scanner is unavailable ({exc}); "
+                    "dependency scanning was skipped."
+                )
+            except OsvError as exc:
+                logger.warning("  osv-scanner failed: %s", exc)
+                scans.append(ScanReport(status=ScanStatus.ERROR, scanner="osv", error=str(exc)))
+            except Exception as exc:  # noqa: BLE001 - a scanner bug must not crash the run
+                logger.debug("osv-scanner failed for %s", repo.full_name, exc_info=True)
+                scans.append(
+                    ScanReport(
+                        status=ScanStatus.ERROR,
+                        scanner="osv",
+                        error=f"osv-scanner failed: {exc}",
                     )
                 )
 

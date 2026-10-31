@@ -486,6 +486,11 @@ def _render_run_details(report: Report) -> list[str]:
                 f"{report.settings.get('gitleaks_timeout', '?')}s, "
                 f"files above {cap_mb} MB skipped"
             )
+        if report.settings.get("enable_osv"):
+            lines.append(
+                f"- Dependency scan: `osv-scanner` (lockfiles, queries api.osv.dev), "
+                f"timeout {report.settings.get('osv_timeout', '?')}s"
+            )
     if report.recall_queries:
         lines.append("- Search queries:")
         for query in report.recall_queries:

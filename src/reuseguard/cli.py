@@ -131,6 +131,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="overall gitleaks process limit, 10-3600 (default: 300)",
     )
     check.add_argument(
+        "--osv",
+        action="store_true",
+        help=(
+            "also check lockfiles for known vulnerable dependencies with osv-scanner; "
+            "this queries the public OSV database over the network"
+        ),
+    )
+    check.add_argument(
+        "--osv-timeout",
+        type=_osv_timeout,
+        default=None,
+        metavar="SECONDS",
+        help="overall osv-scanner process limit, 10-3600 (default: 300)",
+    )
+    check.add_argument(
         "--sandbox",
         nargs="?",
         const="all",
@@ -350,6 +365,23 @@ def _run_check(args: argparse.Namespace) -> int:
                 "a warning recorded."
             )
 
+    osv_timeout = _pick(args.osv_timeout, None, 300.0)
+    if args.osv_timeout is not None and not args.osv:
+        print("error: --osv-timeout requires --osv", file=sys.stderr)
+        return 2
+    if args.osv:
+        if not enable_scan:
+            print(
+                "error: --osv requires static scanning; remove --no-scan",
+                file=sys.stderr,
+            )
+            return 2
+        if not shutil.which("osv-scanner"):
+            logger.warning(
+                "osv-scanner was not found on PATH; dependency scanning will be skipped "
+                "and a warning recorded."
+            )
+
     try:
         sandbox_limits = SandboxLimits(
             image=args.sandbox_image or DEFAULT_IMAGE,
@@ -403,6 +435,8 @@ def _run_check(args: argparse.Namespace) -> int:
         semgrep_timeout=semgrep_timeout,
         enable_gitleaks=args.gitleaks,
         gitleaks_timeout=gitleaks_timeout,
+        enable_osv=args.osv,
+        osv_timeout=osv_timeout,
         sandbox_mode=sandbox_mode,
         sandbox_image=sandbox_limits.image,
         sandbox_timeout=sandbox_limits.timeout_seconds,
@@ -557,4 +591,11 @@ def _gitleaks_timeout(value: str) -> float:
     parsed = _positive_float(value)
     if not 10.0 <= parsed <= 3600.0:
         raise argparse.ArgumentTypeError("gitleaks timeout must be between 10 and 3600 seconds")
+    return parsed
+
+
+def _osv_timeout(value: str) -> float:
+    parsed = _positive_float(value)
+    if not 10.0 <= parsed <= 3600.0:
+        raise argparse.ArgumentTypeError("osv-scanner timeout must be between 10 and 3600 seconds")
     return parsed

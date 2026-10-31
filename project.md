@@ -30,7 +30,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.5.0）
+## 4. 当前状态（v0.6.0）
 
 已实现：
 
@@ -41,10 +41,11 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 静态扫描：内置规则集，带误报抑制和覆盖上限
 - 外部扫描器：Semgrep 适配器（本地规则、JSON → 统一 `Finding`、降级 / 错误边界）
 - 外部扫描器：gitleaks 适配器（`--gitleaks`，内置规则、固定本地配置、凭据脱敏、追加合并）
+- 外部扫描器：osv-scanner 适配器（`--osv`，lockfile 依赖漏洞、别名合并、追加合并）
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--config`、`--semgrep-config`、`--gitleaks`、`--sandbox`、`demo`、
-  `--fail-on`、`--keep-workdir`
+- CLI：`check`、`--idea`、`--config`、`--semgrep-config`、`--gitleaks`、`--osv`、
+  `--sandbox`、`demo`、`--fail-on`、`--keep-workdir`
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
@@ -53,7 +54,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 未实现：
 
 - 在沙箱内执行仓库行为（安装、导入、运行测试）
-- OSV（lockfile 漏洞）适配器
+- OSV 离线数据库模式（当前 `--osv` 需要网络）
 - gitleaks 自定义规则集（当前固定使用二进制内置规则）
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
 
@@ -75,6 +76,7 @@ src/reuseguard/
 │   ├── process.py      # 通用 argv 子进程边界（shell=False + 超时）
 │   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
 │   ├── gitleaks.py     # gitleaks JSON → 统一 ScanReport（凭据脱敏）
+│   ├── osv.py          # osv-scanner JSON → 统一 ScanReport（依赖漏洞）
 │   └── sandbox.py      # Docker 检测 + 加固命令 + 隔离探测
 └── stages/
     ├── recall.py       # 查询构造、相似度、召回
@@ -370,6 +372,37 @@ gitleaks dir <root>
 诚实边界：gitleaks 不报告扫描文件数，合并报告沿用基础扫描器的 `files_scanned`；它只扫
 默认分支快照、不扫 git 历史，因此“没发现凭据”不等于“从未泄露过”。
 
+### 7.10 外部扫描器：osv-scanner（M5 第三步，追加式）
+
+`--osv` 开启，默认关闭。和 gitleaks 一样追加在内置扫描 / Semgrep 之后，结果合并进同一个
+`ScanReport`（形如 `builtin-patterns+gitleaks+osv`）。
+
+调用方式（`shell=False`，argv 列表，需要 osv-scanner **v2**）：
+
+```text
+osv-scanner scan source --recursive <root> --format json --output-file <tmp>/osv.json
+```
+
+- v1 的 `osv-scanner -r <root> --format json` 不兼容；v1 会以 scan error 失败，不静默跳过。
+- **退出码不是“0 成功 / 非 0 失败”**：0 = 有包但无漏洞，1 = 有漏洞（正常结果），
+  128 = 没找到任何 lockfile，127 = 一般错误，其余记为 scan error。
+- 解析 `results[].packages[].groups`：一个 advisory 可能有多个编号（GHSA / CVE / GO /
+  RUSTSEC），`groups` 已按别名归并，**一个 group 只产生一条 finding**，避免同一条漏洞在
+  报告里出现三次。
+- 同一 advisory 命中同一 lockfile 的多个包时合并成一条，列出受影响的包（最多 5 个）；
+  不同 lockfile 各自一条（`path` 不同，合并时不会被去重掉）。
+- severity 取 `database_specific.severity` / `ecosystem_specific.severity` 标签。
+  **只有 CVSS 向量时按 medium 记录**，不在本地重算分数（算错成 critical 比保守的
+  medium 更糟）。
+- `rule_id = osv:<首选编号>`，`category="dependency"`，`path=lockfile`，`line=None`；
+  `evidence` 只放 `包名@版本` 和 `https://osv.dev/vulnerability/<id>`。
+- 复用 `suppression_reason()`：tests/fixtures 下的 lockfile 命中记为 suppressed。
+- **没有 lockfile（退出码 128）→ `SCANNED` + `truncated=True`**，结论至少 INSPECT，并写
+  warning。绝不能把“没找到 lockfile”当成“没有漏洞依赖”。
+
+诚实边界：只覆盖 osv-scanner 认识的 lockfile；`--osv` 会访问 `api.osv.dev`（解析不完整的
+锁文件时可能还会访问包管理器 registry），只发包名和版本；离线数据库模式未实现。
+
 ## 8. 安全模型
 
 被检查的仓库是不可信输入。安全边界：
@@ -388,13 +421,17 @@ gitleaks dir <root>
 7. **gitleaks 边界**：只调用本机二进制；固定 `--config` 忽略仓库 `.gitleaks.toml`，
    `--gitleaks-ignore-path` 指向空目录，`--ignore-gitleaks-allow` 关闭行内白名单；
    报告写在私有临时目录并限制大小；finding 只保留脱敏证据。
-8. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
-   `api.securityscorecards.dev`。不调用 LLM，不上传内容。Semgrep 不会因扫描而联网
-   （本地规则 + `--metrics=off` + `--disable-version-check`）；gitleaks 只用本地规则，
-   不访问网络。
-9. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
-   不写入报告、不打印、不落盘。被检查仓库里的凭据同样不写进报告，只保留 `[REDACTED]`。
-10. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
+8. **osv-scanner 边界**：只读 lockfile，不安装依赖、不执行构建；JSON 写私有临时目录并
+   限制大小；没有 lockfile 记为覆盖不完整；依赖漏洞按 advisory 标签定级，缺标签时保守为
+   medium，不本地重算 CVSS。
+9. **网络边界**：默认只访问 `api.github.com`、`codeload.github.com`、
+   `api.securityscorecards.dev`；开启 `--osv` 时额外访问 `api.osv.dev`（只发包名和版本，
+   解析不完整的锁文件时可能访问包管理器 registry）。不调用 LLM，不上传仓库内容。
+   Semgrep 不会因扫描而联网（本地规则 + `--metrics=off` + `--disable-version-check`）；
+   gitleaks 只用本地规则，不访问网络。
+10. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
+    不写入报告、不打印、不落盘。被检查仓库里的凭据同样不写进报告，只保留 `[REDACTED]`。
+11. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
     `|` 会转义。容器探测输出和外部扫描器输出同样按不可信数据处理。
 
 剩余风险：
@@ -404,6 +441,8 @@ gitleaks dir <root>
 - Semgrep 的覆盖范围取决于用户提供的规则集；`.semgrepignore` 仍可能缩小扫描范围。
 - gitleaks 的规则集来自本机安装的二进制；仓库提供的配置/白名单被刻意忽略，但团队
   自定义规则仍需后续支持。它只扫默认分支快照，不覆盖 git 历史。
+- osv-scanner 只覆盖它认识的 lockfile；`--osv` 需要网络，且没有 lockfile 时无法给出
+  依赖层面的结论。
 - 沙箱依赖本机 Docker daemon、容器运行时和本地镜像；这些仍是信任边界。
 - 私有仓库的 tarball 访问需要 token；当前实现不向 codeload 发送 token，
   因此私有仓库可能下载失败（会降级为 scan error → INSPECT）。
@@ -432,6 +471,10 @@ gitleaks dir <root>
   （`dir`、`--config`、`--gitleaks-ignore-path`、`--ignore-gitleaks-allow`、
   `--exit-code 0`）、severity 映射、凭据脱敏（多行、已脱敏、短/缺失 secret）、
   越界路径、坏 JSON / 缺报告 / 超限、去重、截断、缺失二进制降级、合并语义和 CLI 校验。
+- osv-scanner 测试全部使用 fake runner + 临时报告文件，CI 不安装 osv-scanner、不联网。
+  覆盖：退出码语义（0/1 成功、128 覆盖不完整、其余错误）、别名分组、同 advisory 多包
+  合并、跨 lockfile 不合并、severity 标签映射与缺失回退、CVSS-only 不猜分、越界路径、
+  抑制、规则禁用/覆盖、截断、坏 JSON / 缺报告 / 超限、缺失二进制降级和 CLI 校验。
 - 结论测试覆盖 7.5 的每条分支。
 - CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码、`--sandbox` 参数组合。
 - 真实网络和真实 Docker 只用于手动验收，不进入默认 CI。
@@ -447,6 +490,7 @@ reuseguard check psf/requests --config examples/reuseguard.yaml
 reuseguard check psf/requests --no-recall --sandbox all
 reuseguard check psf/requests --no-recall --semgrep-config rules/
 reuseguard check psf/requests --no-recall --gitleaks
+reuseguard check psf/requests --no-recall --osv
 ```
 
 ## 10. 里程碑
@@ -468,17 +512,20 @@ reuseguard check psf/requests --no-recall --gitleaks
     - 报告“Sandbox”区块与 summary 列；结论只加 caveat，不升级也不判恶意
   - 待办：真实 Docker 手动冒烟验收；在沙箱内执行仓库行为（安装 / 导入 / 测试）
   - 边界：单次运行只代表当次容器配置，不是“无害证明”
-- **M5（进行中）**：外部扫描器
-  - 已完成：Semgrep 适配器
+- **M5（已完成）**：外部扫描器
+  - Semgrep 适配器
     - `adapters/process.py`：共享的 argv / `shell=False` / 超时 runner
     - `adapters/semgrep.py`：本地规则、JSON 解析、severity 映射、抑制、截断
     - `--semgrep-config` / `--semgrep-timeout`；缺可执行文件才降级到内置
     - 非零退出 / 坏 JSON / 超时 / 缺配置 → scan error，不静默降级
-  - 已完成：gitleaks 适配器（追加式）
+  - gitleaks 适配器（追加式）
     - `adapters/gitleaks.py`：`dir` 扫描、固定本地配置、ignore 路径隔离、凭据脱敏
     - `--gitleaks` / `--gitleaks-timeout`；缺可执行文件才跳过
     - `models.merge_scan_reports()`：多扫描器合并（最高风险、去重、最宽文件数）
-  - 待办：OSV（lockfile）适配器；外部规则 ID 进入 `rules.disable` / `rules.severity`
+  - osv-scanner 适配器（追加式）
+    - `adapters/osv.py`：`scan source --recursive`、别名分组、退出码语义、缺 lockfile 标记
+    - `--osv` / `--osv-timeout`；依赖漏洞按 advisory 标签定级
+  - 待办：外部规则 ID 进入 `rules.disable` / `rules.severity`；OSV 离线数据库；真实二进制验收
 - **M6（已完成）**：YAML 策略
   - `--config PATH`
   - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob
@@ -508,6 +555,11 @@ reuseguard check psf/requests --no-recall --gitleaks
 | gitleaks 配置 | 固定 `[extend] useDefault`，忽略仓库配置 | 否则被检查仓库可用 `.gitleaks.toml` / `.gitleaksignore` / `gitleaks:allow` 隐藏全部发现 |
 | gitleaks 证据 | 只保留脱敏片段 | 报告会被复制、贴进工单和 CI 日志 |
 | 多扫描器合并 | 最高风险 + 去重 + 最宽文件数 | 文件数相加会重复计数并夸大覆盖 |
+| OSV 实现路径 | `osv-scanner` 二进制，不自己调 HTTP API | `querybatch` 要包名+版本，走 HTTP 等于自研六种 lockfile 解析器 |
+| OSV 退出码 | 0 和 1 都算成功 | 退出码 1 表示“发现漏洞”，当成失败会把每个有漏洞的仓库变成 scan error |
+| OSV 别名 | 按 `groups` 合并为一条 | 同一 advisory 的 GHSA/CVE/GO 编号不应在报告里出现三次 |
+| OSV 缺 severity | 保守为 medium，不本地算 CVSS | 算错成 critical 比保守的 medium 更糟 |
+| OSV 无 lockfile | `truncated=True` → 至少 INSPECT | “没找到 lockfile”不能写成“没有漏洞依赖” |
 
 ## 12. 开放问题
 
@@ -527,6 +579,10 @@ reuseguard check psf/requests --no-recall --gitleaks
 9. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
 10. **gitleaks 自定义规则**：当前固定使用二进制内置规则并刻意忽略仓库配置；是否需要
     `--gitleaks-config PATH`（同样必须是本地路径）让团队注入自己的 TOML？
+11. **OSV 离线模式**：`--osv` 目前必须联网（`api.osv.dev`）。是否增加
+    `--osv-offline` + 本地数据库路径，让不能联网的环境也能查依赖漏洞？
+12. **OSV registry 访问**：解析不完整的锁文件时 osv-scanner 可能访问包管理器 registry。
+    是否默认加 `--no-resolve`（只信 lockfile、不解析传递依赖）来收紧网络边界？
 
 ## 13. 如何扩展
 

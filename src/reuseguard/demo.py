@@ -213,15 +213,23 @@ def build_demo_report() -> Report:
     assessments = [
         _assessment(seed, "seed", None, seed_filter, clean_scan),
         _assessment(
-            web_client, "alternative", score_similarity(seed, web_client), web_filter, clean_scan
+            web_client,
+            "alternative",
+            score_similarity(seed, web_client, now=_NOW),
+            web_filter,
+            clean_scan,
         ),
         _assessment(
-            legacy, "alternative", score_similarity(seed, legacy), legacy_filter, clean_scan
+            legacy,
+            "alternative",
+            score_similarity(seed, legacy, now=_NOW),
+            legacy_filter,
+            clean_scan,
         ),
         _assessment(
             suspicious,
             "alternative",
-            score_similarity(seed, suspicious),
+            score_similarity(seed, suspicious, now=_NOW),
             suspicious_filter,
             risky_scan,
             sandbox=demo_sandbox,
@@ -229,7 +237,7 @@ def build_demo_report() -> Report:
         _assessment(
             abandoned,
             "alternative",
-            score_similarity(seed, abandoned),
+            score_similarity(seed, abandoned, now=_NOW),
             abandoned_filter,
             ScanReport(
                 status=ScanStatus.SKIPPED,

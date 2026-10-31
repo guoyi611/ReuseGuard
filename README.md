@@ -31,7 +31,7 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.5.0 已经可用：
+v0.6.0 已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
@@ -39,11 +39,12 @@ v0.5.0 已经可用：
 - 下载默认分支的只读快照，做静态风险扫描
 - 可选使用**本地** Semgrep 规则集做外部静态扫描（`--semgrep-config`）
 - 可选用本地 gitleaks 追加**凭据**扫描（`--gitleaks`），结果并入静态扫描
+- 可选检查 lockfile 里的**已知漏洞依赖**（`--osv`，会联网查询公开 OSV 数据库）
 - 可选地在容器里验证隔离配置（`--sandbox auto` / `--sandbox all`），默认关闭
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：OSV（lockfile 漏洞）适配；在沙箱内执行仓库行为（安装、导入、运行测试）。
+尚未实现：在沙箱内执行仓库行为（安装、导入、运行测试）；OSV 离线数据库模式。
 沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。
 
 ## 工作流
@@ -253,6 +254,38 @@ reuseguard check psf/requests --semgrep-config rules/ --gitleaks --gitleaks-time
 | `--gitleaks` | off | 追加 gitleaks 凭据扫描（内置规则） |
 | `--gitleaks-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
 
+### 外部扫描器：osv-scanner（依赖漏洞）
+
+`--osv` 让 osv-scanner 检查快照里的 lockfile，并把已知漏洞并入静态扫描：
+
+```powershell
+reuseguard check psf/requests --osv
+reuseguard check psf/requests --osv --osv-timeout 600
+```
+
+- 需要 osv-scanner **v2**（`scan source --recursive`）。v1 的命令行不兼容，会以 scan error
+  失败，不会静默跳过。
+- **会联网**：查询公开的 OSV 数据库（`api.osv.dev`）；解析不完整的锁文件时还可能访问
+  包管理器 registry。**只发送包名和版本**，不发送仓库代码。介意的话目前只能不开 `--osv`
+  （离线数据库模式尚未实现）。
+- 只覆盖它认识的 lockfile（`package-lock.json`、`poetry.lock`、`Cargo.lock`、`go.mod`、
+  `Gemfile.lock` 等）。**没有 lockfile 时记为“覆盖不完整”，结论至少 INSPECT**，不会写成
+  “没有漏洞依赖”。
+- 同一漏洞的多个编号（GHSA / CVE / GO / RUSTSEC）合并为一条发现；同一 advisory 影响多个包
+  时也合并成一条，列出受影响的包（最多 5 个）。
+- severity 取 advisory 自带的标签（`database_specific.severity`）：critical/high → 高危，
+  moderate/medium → 中危，low → 低危。**只有 CVSS 向量、没有标签的按 medium 记录**，
+  不在本地重新计算分数。
+- 统一 `Finding`：`rule_id = osv:<GHSA/CVE>`、`category=dependency`、`path=lockfile`；
+  docs/tests 下的 lockfile 仍按误报抑制处理。
+- 退出码 **1 表示“发现漏洞”，不是运行失败**；0/1 都算扫描成功，128 表示没找到任何 lockfile，
+  其他退出码记为 scan error。
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `--osv` | off | 追加依赖漏洞扫描（联网查询 OSV） |
+| `--osv-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
+
 ## 沙箱隔离检查（可选）
 
 v0.3 增加了一个**默认关闭**的容器隔离检查。它验证 ReuseGuard 的隔离配置是否按预期生效，**不在沙箱里执行仓库代码**：
@@ -292,6 +325,8 @@ ReuseGuard 自身也按“被检查的代码不可信”来设计：
 - **沙箱是加固后的旁路。** 只有在显式开启时才调用 Docker；命令用 argv 列表拼装（`shell=False`），固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂 Docker socket，不用 `--privileged`，不自动拉镜像。
 - **外部扫描器只读本地规则。** Semgrep 用 `--semgrep-config PATH` 的本地规则，禁止 `--config auto`；关闭 metrics、版本检查和 gitignore 绕过，不执行仓库代码。
 - **gitleaks 不听仓库的配置。** 固定 `--config`（`[extend] useDefault = true`）防止快照内的 `.gitleaks.toml` 改写规则，`--gitleaks-ignore-path` 指向空目录，`--ignore-gitleaks-allow` 关闭行内白名单；报告只保留脱敏证据。
+- **osv-scanner 只读 lockfile。** 不安装依赖、不运行构建；报告写在私有临时目录；没有 lockfile 时明确记为覆盖不完整，不当作“无漏洞”。
+- **网络边界明确。** 默认只访问 `api.github.com`、`codeload.github.com`、`api.securityscorecards.dev`；开启 `--osv` 时额外访问 `api.osv.dev`（只发包名和版本，不发代码）。不把仓库内容上传给 LLM。
 - **只访问 GitHub 和 OpenSSF Scorecard。** 不把仓库内容上传给 LLM 或其他第三方。
 - **token 不落盘。** 只从环境变量或 `gh auth token` 读取，不写入报告，不打印。
 - **不在报告里渲染原始 HTML。** 仓库描述等用户可控文本会做 HTML 转义。
@@ -355,6 +390,8 @@ reuseguard --version
 | `--semgrep-timeout SECONDS` | 300 | Semgrep 整体进程上限（10–3600） |
 | `--gitleaks` | off | 追加 gitleaks 凭据扫描；不用快照内的 `.gitleaks.toml` / `.gitleaksignore` |
 | `--gitleaks-timeout SECONDS` | 300 | gitleaks 整体进程上限（10–3600） |
+| `--osv` | off | 追加依赖漏洞扫描；会联网查询 OSV，只发包名和版本 |
+| `--osv-timeout SECONDS` | 300 | osv-scanner 整体进程上限（10–3600） |
 | `--sandbox [MODE]` | off | 容器隔离检查：`auto` 只跑 high/critical，`all` 或裸参数跑全部，`off` 关闭 |
 | `--sandbox-image IMAGE` | python:3.11-slim | 沙箱镜像；必须已在本地，不会自动 pull |
 | `--sandbox-timeout SECONDS` | 20 | 单次沙箱运行上限（1–600），超时杀容器 |
@@ -384,6 +421,7 @@ reuseguard --version
 - 沙箱需要本机 Docker 守护进程和预拉取的镜像；不可用时只记 warning，不改变结论。
 - Semgrep 的覆盖范围完全取决于你提供的规则集；ReuseGuard 不内置或联网获取规则。
 - gitleaks 只扫描默认分支快照，不覆盖 git 历史；漏报取决于其内置规则，没有命中不等于没有凭据。
+- osv-scanner 只检查它认识的 lockfile；没有 lockfile 时不做依赖判断（开启 `--osv` 会把结论压到 INSPECT）。离线数据库模式尚未实现。
 
 ## 开发
 
@@ -404,9 +442,9 @@ ruff format --check src tests
 - **M4（进行中）**：隔离动态验证；已完成安全骨架与 CLI 接入（Docker 检测、
   加固容器命令、隔离探测、`--sandbox` 触发、报告区块、fake runner 测试），
   待做“在沙箱内执行仓库行为”
-- **M5（进行中）**：可插拔外部扫描器。已完成 Semgrep 适配器（本地规则、JSON
-  解析、统一 `Finding`、降级与错误边界）和 gitleaks 适配器（`--gitleaks`、
-  固定本地配置、凭据脱敏、与基础扫描合并）；OSV（lockfile）待做
+- **M5（已完成）**：可插拔外部扫描器。Semgrep（本地规则、替换内置扫描）、
+  gitleaks（凭据、追加）、osv-scanner（依赖漏洞、追加）；统一 `Finding`、
+  多扫描器合并、降级与错误边界
 - **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
 
 设计取舍和阶段规则见 [project.md](project.md)。

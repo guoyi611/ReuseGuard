@@ -27,6 +27,7 @@ from reuseguard.models import (
     Verdict,
 )
 from reuseguard.report import render, render_json, render_markdown
+from reuseguard.stages.recall import score_similarity
 
 
 def test_demo_markdown_contains_summary_and_limitations() -> None:
@@ -296,3 +297,43 @@ def test_external_rule_id_is_escaped_in_tables() -> None:
     markdown = render_markdown(report)
 
     assert "evil\\|" in markdown
+
+
+def test_run_details_show_dependency_scan() -> None:
+    repo = RepoMeta(full_name="acme/seed", html_url="https://github.com/acme/seed")
+    report = Report(
+        tool_version="0.6.0",
+        generated_at=datetime.now(timezone.utc),
+        seed=repo,
+        assessments=[
+            Assessment(
+                candidate=Candidate(repo=repo),
+                filter=FilterResult(status=FilterStatus.PASSED, score=8.0),
+                scan=ScanReport(
+                    status=ScanStatus.SCANNED,
+                    files_scanned=3,
+                    scanner="builtin-patterns+osv",
+                ),
+                verdict=Verdict(decision=Decision.USE, confidence=Confidence.HIGH),
+            )
+        ],
+        settings={"enable_osv": True, "osv_timeout": 300.0},
+    )
+
+    markdown = render_markdown(report)
+
+    assert "Dependency scan: `osv-scanner`" in markdown
+    assert "api.osv.dev" in markdown
+    assert "`builtin-patterns+osv` scanned 3 files" in markdown
+
+
+def test_demo_similarity_uses_the_fixed_report_clock() -> None:
+    """The demo must not drift with the wall clock: recency is scored at _NOW."""
+    report = build_demo_report()
+    seed = report.assessments[0].candidate.repo
+    candidate = report.assessments[3].candidate.repo
+    similarity = report.assessments[3].candidate.similarity
+
+    assert similarity is not None
+    expected = score_similarity(seed, candidate, now=report.generated_at)
+    assert similarity.total == expected.total

@@ -738,3 +738,180 @@ def test_gitleaks_runs_alongside_semgrep(tmp_path: Path) -> None:
         "gitleaks:aws-access-token",
     }
     assert assessment.scan.risk is RiskLevel.HIGH
+
+
+# --- OSV integration --------------------------------------------------------
+
+
+def _osv_payload(path: str = "package-lock.json", package: str = "example") -> str:
+    return json.dumps(
+        {
+            "results": [
+                {
+                    "source": {"path": path, "type": "lockfile"},
+                    "packages": [
+                        {
+                            "package": {
+                                "name": package,
+                                "version": "1.3.1",
+                                "ecosystem": "npm",
+                            },
+                            "vulnerabilities": [
+                                {
+                                    "id": "GHSA-c3h9-896r-86jm",
+                                    "summary": "Improper input validation",
+                                    "database_specific": {"severity": "HIGH"},
+                                }
+                            ],
+                            "groups": [{"ids": ["GHSA-c3h9-896r-86jm"]}],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+
+class _OsvRunner:
+    """Fake osv-scanner runner: writes the JSON report the adapter expects."""
+
+    def __init__(self, payload: str | None = None, result: CommandResult | None = None) -> None:
+        self.payload = payload
+        self.result = result
+        self.calls: list[tuple[tuple[str, ...], float]] = []
+
+    def __call__(self, argv, *, timeout: float) -> CommandResult:
+        recorded = tuple(argv)
+        self.calls.append((recorded, timeout))
+        if self.payload is not None:
+            report_path = recorded[recorded.index("--output-file") + 1]
+            Path(report_path).write_text(self.payload, encoding="utf-8")
+        return self.result or CommandResult(argv=recorded, returncode=0)
+
+
+def test_osv_is_additive_and_a_high_advisory_triggers_avoid() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _OsvRunner(_osv_payload())
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_osv=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(
+            {"app.py": "def get(url):\n    return url\n", "package-lock.json": "{}\n"}
+        ),
+        osv_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.SCANNED
+    assert assessment.scan.scanner == "builtin-patterns+osv"
+    assert assessment.scan.risk is RiskLevel.HIGH
+    # The built-in scanner skips lockfiles, so only app.py counts there; OSV
+    # supplies the lockfile evidence without inflating the file count.
+    assert assessment.scan.files_scanned == 1
+    assert assessment.verdict.decision is Decision.AVOID
+    assert any("lockfiles" in item for item in assessment.verdict.limitations)
+    assert runner.calls[0][0][:3] == ("osv-scanner", "scan", "source")
+
+
+def test_osv_disabled_by_default_never_runs() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _OsvRunner(_osv_payload())
+
+    report = Pipeline(
+        Settings(max_candidates=0),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        osv_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assert runner.calls == []
+    assert report.assessments[0].scan.scanner == "builtin-patterns"
+
+
+def test_osv_missing_binary_warns_and_keeps_builtin() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _OsvRunner(
+        result=CommandResult(argv=(), returncode=None, stderr="executable not found")
+    )
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_osv=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        osv_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.scanner == "builtin-patterns"
+    assert assessment.verdict.decision is Decision.USE
+    assert any("osv-scanner is unavailable" in warning for warning in report.warnings)
+
+
+def test_osv_failure_is_a_scan_error_not_a_silent_fallback() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _OsvRunner(result=CommandResult(argv=(), returncode=127, stderr="network down"))
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_osv=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        osv_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.status is ScanStatus.ERROR
+    assert assessment.scan.scanner == "builtin-patterns+osv"
+    assert "network down" in (assessment.scan.error or "")
+    assert assessment.verdict.decision is Decision.INSPECT
+
+
+def test_osv_without_a_lockfile_marks_coverage_incomplete() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    runner = _OsvRunner(result=CommandResult(argv=(), returncode=128))
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_osv=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_CLEAN_FILES),
+        osv_runner=runner,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.scan.truncated is True
+    assert assessment.verdict.decision is Decision.INSPECT
+    assert any("found no lockfile" in warning for warning in report.warnings)
+
+
+def test_all_additive_scanners_keep_their_order_in_the_name() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_gitleaks=True, enable_osv=True),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(
+            {"app.py": "def get(url):\n    return url\n", "package-lock.json": "{}\n"}
+        ),
+        gitleaks_runner=_GitleaksRunner(_gitleaks_payload("config.py")),
+        osv_runner=_OsvRunner(_osv_payload()),
+    ).run(RepoRef.parse("acme/seed"))
+
+    assert report.assessments[0].scan.scanner == "builtin-patterns+gitleaks+osv"

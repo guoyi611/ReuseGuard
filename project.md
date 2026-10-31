@@ -50,6 +50,8 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
 - 测试：fake adapter / fake runner，全离线
+- 已验证（Windows）：gitleaks 8.30.1 与 osv-scanner 2.7.0 的真实二进制；装在项目内
+  `.tools/scanners/`，不写入系统 PATH，删目录即卸载
 
 未实现：
 
@@ -384,6 +386,9 @@ osv-scanner scan source --recursive <root> --format json --output-file <tmp>/osv
 ```
 
 - v1 的 `osv-scanner -r <root> --format json` 不兼容；v1 会以 scan error 失败，不静默跳过。
+- 实测边界：递归扫描**跳过 `.` 开头的隐藏目录**（仓库里 `.config/` 这类目录下的 lockfile
+  不会被扫到）；lockfile 带 **UTF-8 BOM** 时解析失败，以非 0 退出（适配器记为 scan error，
+  不会当成干净）。
 - **退出码不是“0 成功 / 非 0 失败”**：0 = 有包但无漏洞，1 = 有漏洞（正常结果），
   128 = 没找到任何 lockfile，127 = 一般错误，其余记为 scan error。
 - 解析 `results[].packages[].groups`：一个 advisory 可能有多个编号（GHSA / CVE / GO /
@@ -478,6 +483,17 @@ osv-scanner scan source --recursive <root> --format json --output-file <tmp>/osv
 - 结论测试覆盖 7.5 的每条分支。
 - CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码、`--sandbox` 参数组合。
 - 真实网络和真实 Docker 只用于手动验收，不进入默认 CI。
+
+### 真实二进制验收（2026-10-31，Windows）
+
+- **gitleaks 8.30.1**：夹具里放恶意 `.gitleaks.toml`（allowlist 全部路径）和
+  `# gitleaks:allow` 注释，2 条命中仍然被报出；有命中时退出码为 0（`--exit-code 0`）；
+  `--redact` 后证据只剩 `[REDACTED]`。
+- **osv-scanner 2.7.0**：真实 `package-lock.json` / `requirements.txt` 解析成功，`groups`
+  别名合并正确，有漏洞时退出码 1 被当成正常结果；发现隐藏目录跳过与 BOM 解析失败两个边界。
+- **端到端**：`lodash/lodash` 真实快照 + `--gitleaks --osv` → `builtin-patterns+gitleaks+osv`，
+  119 条发现，结论 AVOID，两条 scanner caveat 均在。
+- **未验收**：Semgrep（缺本地规则）、Docker（缺镜像与 daemon）。
 
 手动验收命令：
 
@@ -583,6 +599,10 @@ reuseguard check psf/requests --no-recall --osv
     `--osv-offline` + 本地数据库路径，让不能联网的环境也能查依赖漏洞？
 12. **OSV registry 访问**：解析不完整的锁文件时 osv-scanner 可能访问包管理器 registry。
     是否默认加 `--no-resolve`（只信 lockfile、不解析传递依赖）来收紧网络边界？
+13. **开发依赖噪音**：`--osv` 会把 devDependencies 一起报出来（lodash 实测 119 条）。
+    是否加“只看生产依赖”的开关，或在报告里把 dev/prod 分层显示？
+14. **依赖漏洞的等级口径**：当前用 advisory 标签；实测 osv-scanner 按 CVSS 会多报一条
+    High（GitHub 标 MODERATE、CVSS ≥ 7）。是否本地实现 CVSS v3 计算，或同时显示两种口径？
 
 ## 13. 如何扩展
 

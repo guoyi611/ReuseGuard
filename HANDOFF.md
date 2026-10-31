@@ -225,9 +225,15 @@ config / CLI / pipeline / report / verdict：
 
 - 只扫默认分支快照，不扫 git 历史；`containment` 那套 caveat 不适用于它，但结论里会写
   “没发现凭据 ≠ 从未提交过凭据”。
-- 没有真实 gitleaks 二进制验收（本机未安装、也没联网下载）；命令与解析只在 fake
-  runner 层验证。首次真实运行时重点确认 `dir` 命令、`[extend] useDefault`、
-  `--gitleaks-ignore-path` 指向空目录不报错。
+- **已在 Windows 上用真实 gitleaks 8.30.1 验收**（`.tools\scanners\gitleaks.exe`，zip 的
+  SHA256 与官方 checksums 一致）：
+  - `dir`、`--report-format json`、`--report-path`、`--config`、`--gitleaks-ignore-path`、
+    `--ignore-gitleaks-allow` 全部可用。
+  - 夹具里放了一个 `[[allowlists]] paths=['.*']` 的 `.gitleaks.toml` 和一行
+    `# gitleaks:allow`，**2 条命中仍然被报出来**，证明仓库无法用自己的配置让扫描器闭嘴。
+  - 有命中时进程退出码仍是 0（`--exit-code 0` 生效），适配器不会误判成失败。
+  - `--redact` 会把整段 `Match` 变成 `REDACTED`，二次脱敏后 evidence 只剩 `[REDACTED]`
+    （没有行内上下文）。隐私优先的取舍，不是 bug。
 - gitleaks 不报告扫描文件数，合并报告沿用基础扫描器的 `files_scanned`；如果将来让
   gitleaks 单独出报告，`files_scanned == 0` 会触发 INSPECT。
 - 外部规则 ID 还不能写进 YAML 的 `rules.disable` / `rules.severity`（配置校验只认
@@ -263,11 +269,24 @@ config / CLI / pipeline / report / verdict：
 
 诚实边界：
 
-- 没有真实 osv-scanner 验收（本机未安装）。命令、JSON 结构、退出码都按官方 v2 文档写，
-  首次真跑要确认 `--output-file` 行为、`groups` 是否总出现、退出码 128 的实际触发条件。
+- **已在 Windows 上用真实 osv-scanner 2.7.0 验收**（`.tools\scanners\osv-scanner.exe`）：
+  - `scan source --recursive` + `--format json --output-file` 可用；真实输出里 `groups`
+    存在且被正确合并；有漏洞时退出码确实是 **1**，没有被误判成失败。
+  - 端到端：`reuseguard check lodash/lodash --no-recall --gitleaks --osv` 真实下载 49 MB
+    快照，三个扫描器合并为 `builtin-patterns+gitleaks+osv`，119 条发现，结论 AVOID，
+    gitleaks / OSV 两条 caveat 都在报告里。
+  - 两个实测边界：**递归扫描会跳过 `.` 开头的隐藏目录**（放在 `.tools` 里的夹具完全没被
+    扫到，换到非隐藏临时目录才成功）；**lockfile 带 UTF-8 BOM 时解析失败**
+    （`invalid character '\ufeff'`，退出码 127 → 适配器记为 scan error，不静默放过）。
+  - **等级口径差异**：osv-scanner 表格按 CVSS 算，我们按 advisory 的
+    `database_specific.severity` 标签算。lodash 实测工具报“3 High”，我们只标 2 条 high
+    （第三条 GitHub 标 MODERATE 但 CVSS ≥ 7）。刻意取舍：不在本地算 CVSS，避免把“中”
+    误算成“严重”。
 - `--osv` **会联网**；解析不完整锁文件时 osv-scanner 可能访问包管理器 registry。已写进
   README / project.md 的网络边界。离线数据库模式未做。
 - 只覆盖工具认识的 lockfile；Monorepo 里多个 lockfile 会各出一条，报告会变长。
+- **开发依赖也会算进去**：lodash 的 `package-lock.json` 一次报出 119 条历史漏洞，多数是
+  开发依赖。当前不做 dev/prod 过滤，报告会显得很吵（但结果是真实的）。
 - 严格档下，critical/high 的依赖漏洞会让结论变成 AVOID；这是产品选择，不是“项目恶意”。
   报告 caveat 写了“通常可以通过升级修复”。
 
@@ -362,17 +381,29 @@ python -m build
      单独冒烟。
    - 超时只保证杀掉容器；宿主机 Docker daemon 卡死时 `docker rm -f` 也可能超时。
 
-8. **gitleaks 需要 `dir` 命令（v8.19+）**：更老的版本以退出码 126 失败，适配器记为
-   scan error，不会静默降级。**还没有真实 gitleaks 验收**（本机未安装、也未联网下载）；
-   首次真跑时确认 `dir`、`[extend] useDefault`、`--gitleaks-ignore-path` 指向空目录
-   这三处。若空目录会报错，改成传一个显式的空 `.gitleaksignore` 文件路径。
+8. **gitleaks 8.30.1 已验收**：二进制在 `.tools\scanners\gitleaks.exe`，**不在系统 PATH**。
+   用之前要在当前终端加一行：
+   ```powershell
+   $env:PATH = "$PWD\.tools\scanners;$env:PATH"
+   ```
+   更老的 gitleaks（没有 `dir` 命令）会以退出码 126 失败，适配器记为 scan error，不静默降级。
 
 9. **Python 包没有装进 `.venv`**：本会话用 `$env:PYTHONPATH="src"` 跑 pytest，ruff 用
    `.tools\bin\ruff.exe`。直接 `python -m pytest` 会 `ModuleNotFoundError`。
 
-10. **osv-scanner 需要 v2**：v1 的 `-r` 命令行不兼容，会以 scan error 失败。**同样没有真实
-    二进制验收**；首次真跑重点确认 `--output-file`、`groups`、退出码 1/128。`--osv` 会联网
-    （`api.osv.dev`，可能还有包管理器 registry），只发包名和版本。
+10. **osv-scanner 2.7.0 已验收**：二进制在 `.tools\scanners\osv-scanner.exe`。两个实测边界：
+    - 递归扫描**跳过 `.` 开头的隐藏目录**。快照根目录本身不隐藏，所以正常使用没问题，但
+      仓库里 `.config/` 这类隐藏目录下的 lockfile 不会被扫到。
+    - lockfile 带 **UTF-8 BOM** 时 osv-scanner 解析失败（退出码 127 → scan error）。用
+      PowerShell `Set-Content -Encoding utf8` 造夹具时要小心 BOM。
+    `--osv` 会联网（`api.osv.dev`，可能还有包管理器 registry），只发包名和版本。
+
+11. **`.tools\bin` 有一个坏 ACL**：这是上一个沙箱会话留下的，当前会话对它的写入被拒绝
+    （读和执行没问题，ruff 还能用）。所以本次把下载的扫描器放在 `.tools\scanners\`。
+    如果以后要写 `.tools\bin`，先修 ACL 或换个新目录，不要硬试。
+
+12. **依赖漏洞会包含开发依赖**：一次 `--osv` 可能报出上百条（lodash 实测 119 条），而且
+    没有 dev/prod 过滤。报告只展示前 12 条，完整结果在 JSON 里。这是当前的真实行为。
 
 ## 8. 下一步建议：M4 收尾 / 行为探测
 
@@ -421,22 +452,39 @@ M5 的三个扫描器（Semgrep、gitleaks、OSV）都已完成。现在最值�
 - 统一合并 `merge_scan_reports()`：最高风险 + 去重 + 最宽文件数 + 任一 scanner 出错整份
   ERROR。
 
-### 9.2 真实工具验收（建议先做，但要先问用户）
+### 9.2 真实工具验收（gitleaks / OSV 已完成）
 
-当前机器上 docker / gitleaks / semgrep / osv-scanner **一个都没装**，所有外部路径只有
-fake runner 验证。按成本从低到高：
+用户同意后，二进制装在**项目内** `<repo>\.tools\scanners\`（gitignored，不走系统 PATH，
+删目录即卸载）。安装记录：
 
-1. **gitleaks + osv-scanner**（单个二进制，不需要 Docker）：
-   `reuseguard check <repo> --no-recall --gitleaks --osv`。
-   重点确认：`gitleaks dir`、`[extend] useDefault`、`--gitleaks-ignore-path` 指向空目录
-   不报错；`osv-scanner scan source --output-file`、退出码 1/128 的真实行为。
-2. **Semgrep**：需要用户提供本地规则目录；验证 `--no-git-ignore` 与 `.semgrepignore` 的
-   实际影响（这是已知覆盖缺口）。
-3. **Docker**：`--sandbox all`，需要本地镜像，且 Windows / Docker Desktop 的 bind mount
-   权限语义与 Linux 不同。
+| 工具 | 版本 | SHA256 | 来源 |
+| --- | --- | --- | --- |
+| gitleaks | 8.30.1 | `17157e2ee8b76fc8b1d8bee607a250e34b8a8023c8bc81822d4b5ee4d78fcb7c` | 官方 release zip，SHA256 与官方 checksums 一致 |
+| osv-scanner | 2.7.0 | `9964ed64ec9a387391eb4cc006ad5c531154821aef29b793e02c448de4686438` | 官方 release exe（无官方 checksums，仅 HTTPS） |
 
-装工具属于改动机器，**动手前必须问用户**。验收时记录：命令、输出摘要、与假设不符的地方，
-写回本文件 4.x。
+使用前：
+
+```powershell
+$env:PATH = "$PWD\.tools\scanners;$env:PATH"
+$env:PYTHONPATH = "src"   # 包没装进 .venv
+```
+
+**已完成**
+
+1. **gitleaks**：夹具含恶意 `.gitleaks.toml` + `# gitleaks:allow`，2 条命中仍然报出；
+   退出码 0 而不是 1；脱敏后 evidence 只剩 `[REDACTED]`。
+2. **osv-scanner**：真实 lockfile 解析成功、`groups` 合并正确、退出码 1 被当成正常结果；
+   发现隐藏目录被跳过、BOM lockfile 解析失败两个边界。
+3. **端到端**：`lodash/lodash` 真实快照 + `--gitleaks --osv`，119 条发现，AVOID。
+
+**仍待做**
+
+- **Semgrep**：需要用户提供本地规则目录；验证 `--no-git-ignore` 与 `.semgrepignore` 的
+  实际影响（已知覆盖缺口）。
+- **Docker**：`--sandbox all`，需要本地镜像，且 Windows / Docker Desktop 的 bind mount
+  权限语义与 Linux 不同。
+
+装工具属于改动机器，**动手前必须问用户**；验收结果要写回本文件 4.x。
 
 ### 9.3 M4 行为探测（先设计，不写代码）
 

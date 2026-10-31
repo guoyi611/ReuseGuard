@@ -254,6 +254,9 @@ reuseguard check psf/requests --semgrep-config rules/ --gitleaks --gitleaks-time
 | `--gitleaks` | off | 追加 gitleaks 凭据扫描（内置规则） |
 | `--gitleaks-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
 
+> 已在 Windows 上用 gitleaks 8.30.1 实测：仓库自带的 `.gitleaks.toml` 和 `# gitleaks:allow`
+> 无法隐藏命中；`--redact` 后证据只剩 `[REDACTED]`。
+
 ### 外部扫描器：osv-scanner（依赖漏洞）
 
 `--osv` 让 osv-scanner 检查快照里的 lockfile，并把已知漏洞并入静态扫描：
@@ -285,6 +288,10 @@ reuseguard check psf/requests --osv --osv-timeout 600
 | --- | ---: | --- |
 | `--osv` | off | 追加依赖漏洞扫描（联网查询 OSV） |
 | `--osv-timeout SECONDS` | 300 | 整体进程上限（10–3600） |
+
+> 已在 Windows 上用 osv-scanner 2.7.0 实测：真实 lockfile 解析、别名合并、退出码 1 都正常。
+> 两个边界：递归扫描会跳过 `.` 开头的隐藏目录；lockfile 带 UTF-8 BOM 时会解析失败（记为
+> scan error，不会静默放过）。
 
 ## 沙箱隔离检查（可选）
 
@@ -422,6 +429,7 @@ reuseguard --version
 - Semgrep 的覆盖范围完全取决于你提供的规则集；ReuseGuard 不内置或联网获取规则。
 - gitleaks 只扫描默认分支快照，不覆盖 git 历史；漏报取决于其内置规则，没有命中不等于没有凭据。
 - osv-scanner 只检查它认识的 lockfile；没有 lockfile 时不做依赖判断（开启 `--osv` 会把结论压到 INSPECT）。离线数据库模式尚未实现。
+- `--osv` 会把开发依赖也算进去（lodash 实测一次 119 条），当前没有 dev/prod 过滤，报告会显得很吵但结果是真实的。
 
 ## 开发
 

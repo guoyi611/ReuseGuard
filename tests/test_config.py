@@ -54,3 +54,17 @@ def test_settings_public_dict_hides_token() -> None:
     assert "token" not in public
     assert public["token_configured"] is True
     assert public["max_candidates"] == 5
+
+
+def test_sandbox_defaults_are_disabled() -> None:
+    settings = Settings()
+
+    assert settings.sandbox_mode == "off"
+    assert settings.sandbox_image == "python:3.11-slim"
+    assert settings.sandbox_timeout == 20.0
+    assert settings.public_dict()["sandbox_mode"] == "off"
+
+
+def test_settings_rejects_unknown_sandbox_mode() -> None:
+    with pytest.raises(ValueError, match="invalid sandbox mode"):
+        Settings(sandbox_mode="eager")

@@ -12,6 +12,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import __version__
+from .adapters.sandbox import (
+    DEFAULT_CPUS,
+    DEFAULT_IMAGE,
+    DEFAULT_MEMORY_MB,
+    DEFAULT_PIDS_LIMIT,
+    DEFAULT_TIMEOUT_SECONDS,
+)
 from .adapters.scanner import scan_directory
 from .models import (
     Assessment,
@@ -20,6 +27,8 @@ from .models import (
     FilterStatus,
     RepoMeta,
     Report,
+    SandboxReport,
+    SandboxStatus,
     ScanReport,
     ScanStatus,
 )
@@ -177,6 +186,30 @@ def build_demo_report() -> Report:
         ],
     )
 
+    demo_sandbox = SandboxReport(
+        status=SandboxStatus.COMPLETED,
+        image=DEFAULT_IMAGE,
+        container="reuseguard-demo-sandbox",
+        exit_code=0,
+        duration_seconds=1.8,
+        containment_ok=True,
+        memory_mb=DEFAULT_MEMORY_MB,
+        cpus=DEFAULT_CPUS,
+        pids_limit=DEFAULT_PIDS_LIMIT,
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+        probe={
+            "files": 3,
+            "bytes": 512,
+            "symlinks": 0,
+            "executables": 1,
+            "src_entries": 3,
+            "src_writable": False,
+            "tmp_writable": True,
+            "network_reachable": False,
+            "network_target": "1.1.1.1:443",
+        },
+    )
+
     assessments = [
         _assessment(seed, "seed", None, seed_filter, clean_scan),
         _assessment(
@@ -191,6 +224,7 @@ def build_demo_report() -> Report:
             score_similarity(seed, suspicious),
             suspicious_filter,
             risky_scan,
+            sandbox=demo_sandbox,
         ),
         _assessment(
             abandoned,
@@ -281,6 +315,8 @@ def _assessment(
     similarity,
     filter_result: FilterResult,
     scan: ScanReport,
+    *,
+    sandbox: SandboxReport | None = None,
 ) -> Assessment:
     verdict = decide(repo, filter_result, scan)
     return Assessment(
@@ -288,6 +324,7 @@ def _assessment(
         filter=filter_result,
         scan=scan,
         verdict=verdict,
+        sandbox=sandbox,
     )
 
 

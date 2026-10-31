@@ -12,6 +12,7 @@ from .models import (
     Finding,
     RepoMeta,
     Report,
+    SandboxStatus,
     ScanStatus,
 )
 
@@ -75,8 +76,8 @@ def render_markdown(report: Report) -> str:
             [
                 "## Summary",
                 "",
-                "| # | Repository | Role | Stars | Match | Scorecard | Static risk | Verdict |",
-                "|---:|---|---|---:|---:|---:|---|---|",
+                "| # | Repository | Role | Stars | Match | Scorecard | Static risk | Sandbox | Verdict |",
+                "|---:|---|---|---:|---:|---:|---|---|---|",
             ]
         )
         for index, assessment in enumerate(report.assessments, start=1):
@@ -95,7 +96,7 @@ def render_markdown(report: Report) -> str:
             header.append(
                 f"| {index} | [{repo.full_name}]({_repo_url(repo)}) | "
                 f"{_role(assessment)} | {repo.stars:,} | {match} | {scorecard} | "
-                f"{risk} | **{_decision(assessment)}** |"
+                f"{risk} | {_sandbox_cell(assessment)} | **{_decision(assessment)}** |"
             )
     else:
         header.extend(["", "No candidate repositories were found."])
@@ -259,6 +260,8 @@ def _render_assessment(index: int, assessment: Assessment) -> list[str]:
             + (f" — {_md(scan.error, 240)}" if scan.error else ".")
         )
 
+    lines.extend(_render_sandbox(assessment))
+
     lines.extend(
         [
             "",
@@ -273,6 +276,128 @@ def _render_assessment(index: int, assessment: Assessment) -> list[str]:
         lines.extend(["", "**Caveats:**", *[f"- {_md(item, 320)}" for item in verdict.limitations]])
 
     return lines
+
+
+def _render_sandbox(assessment: Assessment) -> list[str]:
+    sandbox = assessment.sandbox
+    if sandbox is None:
+        return []
+
+    if sandbox.status is SandboxStatus.COMPLETED:
+        heading = "containment verified" if sandbox.containment_ok else "containment NOT verified"
+    else:
+        heading = sandbox.status.value
+
+    lines: list[str] = ["", f"### Sandbox — {heading}", ""]
+
+    if sandbox.status is not SandboxStatus.COMPLETED:
+        detail = f" — {_md(sandbox.error, 300)}" if sandbox.error else "."
+        lines.append(f"Sandbox probe **{sandbox.status.value}**{detail}")
+        if sandbox.stderr_tail:
+            lines.extend(["", f"`{_code(sandbox.stderr_tail, 400)}`"])
+        lines.extend(
+            [
+                "",
+                "> Sandbox verification was requested but produced no containment evidence. "
+                "This is not evidence that the repository is safe.",
+            ]
+        )
+        return lines
+
+    config: list[str] = [f"`{_code(sandbox.image or 'unknown image', 120)}`", "one container run"]
+    if sandbox.duration_seconds:
+        config.append(f"{sandbox.duration_seconds:.1f}s")
+    config.extend(
+        [
+            f"network `{_code(sandbox.network, 20)}`",
+            f"`{_code(sandbox.mount_target, 40)}` read-only",
+        ]
+    )
+    if sandbox.memory_mb is not None:
+        config.append(f"{sandbox.memory_mb} MB")
+    if sandbox.cpus is not None:
+        config.append(f"{sandbox.cpus:g} CPU")
+    if sandbox.pids_limit is not None:
+        config.append(f"{sandbox.pids_limit} PIDs")
+    if sandbox.timeout_seconds is not None:
+        config.append(f"{sandbox.timeout_seconds:g}s timeout")
+    lines.append(" · ".join(config))
+    lines.append("")
+
+    probe = sandbox.probe
+    files = _probe_int(probe, "files")
+    size = _probe_int(probe, "bytes")
+    symlinks = _probe_int(probe, "symlinks")
+    executables = _probe_int(probe, "executables")
+    details: list[str] = []
+    if files is None:
+        details.append("file count unavailable")
+    else:
+        text = f"{files:,} file{'s' if files != 1 else ''}"
+        if size is not None:
+            text += f" ({_format_bytes(size)})"
+        details.append(text)
+    if symlinks is not None:
+        details.append(f"{symlinks:,} symlink{'s' if symlinks != 1 else ''}")
+    if executables is not None:
+        details.append(f"{executables:,} executable bit{'s' if executables != 1 else ''}")
+    details.append(
+        f"`{_code(sandbox.mount_target, 40)}` writable: **{_yes_no(probe.get('src_writable'))}**"
+    )
+    details.append(f"network reachable: **{_yes_no(probe.get('network_reachable'))}**")
+    details.append(f"`/tmp` writable: {_yes_no(probe.get('tmp_writable'))}")
+    lines.append(" · ".join(details))
+
+    failures: list[str] = []
+    if probe.get("src_writable") is True:
+        failures.append("the repository mount was writable")
+    if probe.get("network_reachable") is True:
+        failures.append("the container could reach the network")
+    if probe.get("src_entries") is None:
+        failures.append("the mount was not readable by the sandbox user")
+    if failures:
+        lines.extend(
+            [
+                "",
+                "**Containment check failed:** "
+                + "; ".join(failures)
+                + ". Treat this run as untrusted and do not use it as evidence.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "> The probe only inspects file metadata and checks the mount and network "
+            "configuration. It does not execute repository code. A clean result covers one "
+            "container run and is not evidence that the repository is safe.",
+        ]
+    )
+    return lines
+
+
+def _sandbox_cell(assessment: Assessment) -> str:
+    sandbox = assessment.sandbox
+    if sandbox is None:
+        return "—"
+    if sandbox.status is SandboxStatus.COMPLETED:
+        return "containment ok" if sandbox.containment_ok else "**containment failed**"
+    return sandbox.status.value
+
+
+def _probe_int(probe: dict, key: str) -> int | None:
+    value = probe.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _yes_no(value: object) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
 
 
 def _finding_row(finding: Finding) -> str:
@@ -299,7 +424,8 @@ def _render_limitations() -> list[str]:
         "not inspected.",
         "- Results reflect public data at the time of the run; a later commit can behave "
         "differently.",
-        "- Dynamic sandbox verification is not part of v0.2.",
+        "- Sandbox verification is opt-in, covers a single container run, and currently checks "
+        "container containment only; it does not execute repository code.",
     ]
 
 
@@ -331,6 +457,14 @@ def _render_run_details(report: Report) -> list[str]:
             lines.append(
                 "- Extra suppression paths: "
                 + ", ".join(f"`{_code(pattern, 120)}`" for pattern in suppress_paths)
+            )
+        sandbox_mode = report.settings.get("sandbox_mode") or "off"
+        if sandbox_mode != "off":
+            image = report.settings.get("sandbox_image") or "unknown"
+            lines.append(
+                f"- Sandbox: mode `{_code(sandbox_mode, 20)}`, image "
+                f"`{_code(image, 120)}`, timeout "
+                f"{report.settings.get('sandbox_timeout', '?')}s"
             )
     if report.recall_queries:
         lines.append("- Search queries:")

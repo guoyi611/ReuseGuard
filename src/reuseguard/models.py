@@ -328,6 +328,7 @@ class Assessment:
     filter: FilterResult
     scan: ScanReport
     verdict: Verdict
+    sandbox: SandboxReport | None = None
 
 
 @dataclass

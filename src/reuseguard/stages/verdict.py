@@ -16,6 +16,8 @@ from ..models import (
     Finding,
     RepoMeta,
     RiskLevel,
+    SandboxReport,
+    SandboxStatus,
     ScanReport,
     ScanStatus,
     Verdict,
@@ -203,9 +205,38 @@ def decide(
         limitations=[
             *base_limitations,
             "Scorecard measures project practice; it is not a code audit.",
-            "No dynamic or sandbox execution was performed in this version.",
+            "Sandbox verification is opt-in and does not execute repository code.",
         ],
     )
+
+
+def add_sandbox_caveat(verdict: Verdict, sandbox: SandboxReport | None) -> Verdict:
+    """Attach sandbox caveats without changing the decision.
+
+    The current probe validates container containment; it does not execute
+    repository code, so it must never strengthen a verdict.
+    """
+    if sandbox is None:
+        return verdict
+
+    if sandbox.status is SandboxStatus.COMPLETED:
+        verdict.limitations.append(
+            "Sandbox evidence covers one container run of the containment probe; "
+            "it does not execute repository code and is not a safety proof."
+        )
+        if sandbox.containment_ok is not True:
+            verdict.limitations.append(
+                "The sandbox containment checks did not pass; do not rely on this run."
+            )
+    elif sandbox.status is SandboxStatus.UNAVAILABLE:
+        verdict.limitations.append(
+            "Sandbox verification was requested but no Docker daemon was available."
+        )
+    else:
+        verdict.limitations.append(
+            f"Sandbox verification did not complete ({sandbox.status.value})."
+        )
+    return verdict
 
 
 def _format_finding(finding: Finding) -> str:

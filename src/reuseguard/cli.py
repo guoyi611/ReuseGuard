@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,12 @@ import httpx
 
 from . import __version__
 from .adapters.github import GitHubClient, GitHubError, GitHubNotFound, GitHubRateLimit
+from .adapters.sandbox import (
+    DEFAULT_IMAGE,
+    DEFAULT_TIMEOUT_SECONDS,
+    SandboxConfigError,
+    SandboxLimits,
+)
 from .adapters.scorecard import ScorecardClient
 from .config import ConfigError, Policy, Settings, load_policy, resolve_github_token
 from .demo import build_demo_report
@@ -91,6 +98,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-scan",
         action="store_true",
         help="disable snapshot download and static scanning",
+    )
+    check.add_argument(
+        "--sandbox",
+        nargs="?",
+        const="all",
+        choices=("off", "auto", "all"),
+        default=None,
+        metavar="{off,auto,all}",
+        help=(
+            "run the opt-in isolation probe: 'auto' for high/critical static risk, "
+            "'all' for every scanned candidate, 'off' to disable (default: off)"
+        ),
+    )
+    check.add_argument(
+        "--sandbox-image",
+        metavar="IMAGE",
+        help="container image for the sandbox; must already be present locally",
+    )
+    check.add_argument(
+        "--sandbox-timeout",
+        type=_sandbox_timeout,
+        default=None,
+        metavar="SECONDS",
+        help="wall-clock limit for one sandbox run, 1-600 (default: 20)",
     )
     check.add_argument(
         "--no-gh-token",
@@ -233,6 +264,33 @@ def _run_check(args: argparse.Namespace) -> int:
     enable_scorecard = bool(_pick(None, policy.scorecard, True)) and not args.no_scorecard
     enable_scan = bool(_pick(None, policy.scan, True)) and not args.no_scan
 
+    sandbox_mode = args.sandbox or "off"
+    if sandbox_mode == "off" and (args.sandbox_image or args.sandbox_timeout is not None):
+        print(
+            "error: --sandbox-image and --sandbox-timeout require --sandbox",
+            file=sys.stderr,
+        )
+        return 2
+    if sandbox_mode != "off" and not enable_scan:
+        print(
+            "error: --sandbox requires static scanning; remove --no-scan "
+            "or set features.scan: true",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        sandbox_limits = SandboxLimits(
+            image=args.sandbox_image or DEFAULT_IMAGE,
+            timeout_seconds=_pick(args.sandbox_timeout, None, DEFAULT_TIMEOUT_SECONDS),
+        )
+    except SandboxConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if sandbox_mode != "off" and not shutil.which("docker"):
+        logger.warning(
+            "Docker was not found on PATH; the sandbox probe will report as unavailable."
+        )
+
     if idea and limit == 0:
         print("error: --limit must be at least 1 when using --idea", file=sys.stderr)
         return 2
@@ -269,6 +327,9 @@ def _run_check(args: argparse.Namespace) -> int:
         enable_recall=enable_recall,
         enable_scorecard=enable_scorecard,
         enable_scan=enable_scan,
+        sandbox_mode=sandbox_mode,
+        sandbox_image=sandbox_limits.image,
+        sandbox_timeout=sandbox_limits.timeout_seconds,
         keep_workdir=args.keep_workdir,
         disabled_rules=policy.disabled_rules,
         severity_overrides=policy.severity_overrides,
@@ -399,4 +460,11 @@ def _positive_float(value: str) -> float:
     parsed = _non_negative_float(value)
     if parsed == 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def _sandbox_timeout(value: str) -> float:
+    parsed = _positive_float(value)
+    if not 1.0 <= parsed <= 600.0:
+        raise argparse.ArgumentTypeError("sandbox timeout must be between 1 and 600 seconds")
     return parsed

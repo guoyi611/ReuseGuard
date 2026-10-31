@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from reuseguard.adapters.sandbox import CommandResult, DockerStatus
 from reuseguard.adapters.snapshot import SnapshotError
 from reuseguard.config import Settings
-from reuseguard.models import Decision, FilterStatus, RepoRef, ScanStatus
+from reuseguard.models import Decision, FilterStatus, RepoRef, RiskLevel, SandboxStatus, ScanStatus
 from reuseguard.pipeline import Pipeline, remove_tree
 from reuseguard.stages.recall import score_similarity
-from tests.fakes import FakeGitHub, FakeScorecard, make_repo, make_snapshot, scorecard_payload
+from tests.fakes import (
+    FakeCommandRunner,
+    FakeGitHub,
+    FakeScorecard,
+    make_repo,
+    make_snapshot,
+    sandbox_probe_output,
+    scorecard_payload,
+)
 
 
 def _snapshot_factory(calls: list[str], fail: bool = False):
@@ -244,3 +253,203 @@ def test_idea_mode_with_no_results_returns_empty_report() -> None:
     assert report.assessments == []
     assert report.seed is None
     assert any("No candidate" in warning for warning in report.warnings)
+
+
+# --- Sandbox stage ----------------------------------------------------------
+
+_RISKY_FILES = {"evil.pth": "import os\nos.system('id')\n"}
+_CLEAN_FILES = {"app.py": "def get(url):\n    return url\n"}
+
+
+class _FakeDetector:
+    def __init__(self, status: DockerStatus) -> None:
+        self.status = status
+        self.calls = 0
+
+    def __call__(self, **_kwargs) -> DockerStatus:
+        self.calls += 1
+        return self.status
+
+
+def _files_snapshot_factory(files: dict[str, str]):
+    def snapshot_fn(repo, destination, **_kwargs):
+        return make_snapshot(Path(destination), files)
+
+    return snapshot_fn
+
+
+def _run_with_sandbox(
+    *,
+    mode: str,
+    files: dict[str, str],
+    runner: FakeCommandRunner,
+    detector: _FakeDetector,
+    sandbox_image: str = "python:3.11-slim",
+):
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+    return Pipeline(
+        Settings(max_candidates=0, sandbox_mode=mode, sandbox_image=sandbox_image),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(files),
+        sandbox_runner=runner,
+        sandbox_detect=detector,
+    ).run(RepoRef.parse("acme/seed"))
+
+
+def test_sandbox_off_by_default_never_contacts_docker() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner()
+
+    report = _run_with_sandbox(mode="off", files=_RISKY_FILES, runner=runner, detector=detector)
+
+    assessment = report.assessments[0]
+    assert assessment.scan.risk is RiskLevel.HIGH
+    assert assessment.sandbox is None
+    assert detector.calls == 0
+    assert runner.calls == []
+
+
+def test_sandbox_auto_runs_for_high_risk() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner(
+        [CommandResult(argv=(), returncode=0, stdout=sandbox_probe_output())]
+    )
+
+    report = _run_with_sandbox(mode="auto", files=_RISKY_FILES, runner=runner, detector=detector)
+
+    assessment = report.assessments[0]
+    assert assessment.sandbox is not None
+    assert assessment.sandbox.status is SandboxStatus.COMPLETED
+    assert assessment.sandbox.containment_ok is True
+    assert detector.calls == 1
+    assert runner.calls[0][0][:2] == ("docker", "run")
+    assert any(
+        "does not execute repository code" in item for item in assessment.verdict.limitations
+    )
+
+
+def test_sandbox_auto_skips_low_risk() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner()
+
+    report = _run_with_sandbox(mode="auto", files=_CLEAN_FILES, runner=runner, detector=detector)
+
+    assert report.assessments[0].scan.risk is RiskLevel.NONE
+    assert report.assessments[0].sandbox is None
+    assert detector.calls == 0
+    assert runner.calls == []
+
+
+def test_sandbox_all_runs_even_for_low_risk() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner(
+        [CommandResult(argv=(), returncode=0, stdout=sandbox_probe_output())]
+    )
+
+    report = _run_with_sandbox(mode="all", files=_CLEAN_FILES, runner=runner, detector=detector)
+
+    assert report.assessments[0].sandbox is not None
+    assert report.assessments[0].sandbox.status is SandboxStatus.COMPLETED
+    assert detector.calls == 1
+
+
+def test_sandbox_unavailable_is_a_warning_not_a_verdict_change() -> None:
+    detector = _FakeDetector(
+        DockerStatus(available=False, reason="Cannot connect to the Docker daemon")
+    )
+    runner = FakeCommandRunner()
+
+    report = _run_with_sandbox(mode="all", files=_CLEAN_FILES, runner=runner, detector=detector)
+
+    assessment = report.assessments[0]
+    assert assessment.sandbox is not None
+    assert assessment.sandbox.status is SandboxStatus.UNAVAILABLE
+    assert assessment.verdict.decision is Decision.USE
+    assert runner.calls == []
+    assert any("sandbox unavailable" in warning for warning in report.warnings)
+    assert any("no Docker daemon" in item for item in assessment.verdict.limitations)
+
+
+def test_sandbox_timeout_is_recorded_and_cleaned_up() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner(
+        [
+            CommandResult(argv=(), timed_out=True),
+            CommandResult(argv=(), returncode=0),
+        ]
+    )
+
+    report = _run_with_sandbox(mode="all", files=_RISKY_FILES, runner=runner, detector=detector)
+
+    assessment = report.assessments[0]
+    assert assessment.sandbox is not None
+    assert assessment.sandbox.status is SandboxStatus.TIMEOUT
+    assert assessment.verdict.decision is Decision.AVOID
+    assert runner.calls[1][0][:3] == ("docker", "rm", "-f")
+    assert any("did not complete" in warning for warning in report.warnings)
+
+
+def test_sandbox_containment_failure_is_flagged() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner(
+        [
+            CommandResult(
+                argv=(),
+                returncode=0,
+                stdout=sandbox_probe_output(src_writable=True),
+            )
+        ]
+    )
+
+    report = _run_with_sandbox(mode="all", files=_CLEAN_FILES, runner=runner, detector=detector)
+
+    assessment = report.assessments[0]
+    assert assessment.sandbox is not None
+    assert assessment.sandbox.containment_ok is False
+    assert any("containment checks did not pass" in warning for warning in report.warnings)
+
+
+def test_sandbox_invalid_image_degrades_to_error() -> None:
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner()
+
+    report = _run_with_sandbox(
+        mode="all",
+        files=_CLEAN_FILES,
+        runner=runner,
+        detector=detector,
+        sandbox_image="-v",
+    )
+
+    assessment = report.assessments[0]
+    assert assessment.sandbox is not None
+    assert assessment.sandbox.status is SandboxStatus.ERROR
+    assert detector.calls == 0
+    assert runner.calls == []
+    assert any("sandbox configuration is invalid" in warning for warning in report.warnings)
+
+
+def test_sandbox_does_not_run_when_scan_was_rejected() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(1.0)})
+    detector = _FakeDetector(DockerStatus(available=True, version="27"))
+    runner = FakeCommandRunner()
+
+    report = Pipeline(
+        Settings(max_candidates=0, sandbox_mode="all"),
+        github,
+        scorecard,
+        snapshot_fn=_files_snapshot_factory(_RISKY_FILES),
+        sandbox_runner=runner,
+        sandbox_detect=detector,
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert assessment.filter.status is FilterStatus.SKIPPED
+    assert assessment.sandbox is None
+    assert detector.calls == 0
+    assert runner.calls == []

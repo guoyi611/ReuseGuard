@@ -18,7 +18,8 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 ## 2. 不做什么
 
 - 不做通用代码扫描平台（VibeGuard / secureCodeBox 的领域）
-- 不自己实现沙箱（v0.2 不做动态执行）
+- 不自己实现容器运行时；隔离检查复用 Docker，只做编排与证据收集
+- 不在沙箱里执行仓库代码（M4 当前范围；行为探测是后续工作）
 - 不保证“绝对安全”，只聚合信号并写明置信边界
 - 不把仓库内容上传给 LLM
 - 不替用户做最终决定；`AVOID` 也是分诊，不是恶意软件判决
@@ -29,7 +30,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.2.0）
+## 4. 当前状态（v0.3.0）
 
 已实现：
 
@@ -40,15 +41,14 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 静态扫描：内置规则集，带误报抑制和覆盖上限
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--config`、`demo`、`--fail-on`、`--keep-workdir`
+- CLI：`check`、`--idea`、`--config`、`--sandbox`、`demo`、`--fail-on`、`--keep-workdir`
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
-- 沙箱安全骨架（M4 内部，尚未接入 CLI）：Docker 检测、加固 `docker run` 计划、
-  容器内隔离探测、fake runner 测试
-- 测试：fake adapter，全离线
+- 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
+  报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
+- 测试：fake adapter / fake runner，全离线
 
 未实现：
 
-- 动态沙箱验证接入 pipeline / CLI（安全骨架已就绪，触发与报告待做）
 - 在沙箱内执行仓库行为（安装、导入、运行测试）
 - 外部扫描器（Semgrep / OSV / gitleaks）
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
@@ -67,11 +67,12 @@ src/reuseguard/
 │   ├── github.py       # GitHub REST：元数据 + search
 │   ├── scorecard.py    # OpenSSF Scorecard API
 │   ├── snapshot.py     # codeload 下载 + 安全解包
-│   └── scanner.py      # 内置静态规则
+│   ├── scanner.py      # 内置静态规则
+│   └── sandbox.py      # Docker 检测 + 加固命令 + 隔离探测
 └── stages/
     ├── recall.py       # 查询构造、相似度、召回
     ├── reputation.py   # Scorecard → FilterResult
-    └── verdict.py      # Filter + Scan → Verdict
+    └── verdict.py      # Filter + Scan → Verdict（含沙箱 caveat）
 ```
 
 原则：
@@ -93,8 +94,9 @@ src/reuseguard/
 | `FilterResult` | 信誉过滤结果 | status, score, checks, reasons, warnings |
 | `Finding` | 单条静态发现 | rule_id, severity, path, line, evidence, suppressed |
 | `ScanReport` | 扫描结果 | status, risk, findings, files_scanned, truncated |
+| `SandboxReport` | 一次容器隔离探测的证据 | status, image, exit_code, timed_out, containment_ok, probe, error |
 | `Verdict` | 最终结论 | decision, confidence, reasons, limitations |
-| `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict |
+| `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict, sandbox |
 | `Report` | 一次运行的完整结果 | seed, query, assessments, queries, warnings, settings |
 
 `Report.to_dict()` 会递归把 dataclass / Enum / datetime / Path 转成 JSON 类型，并附加
@@ -248,25 +250,59 @@ scan risk low/none:
 都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()` 会把最终生效的
 规则策略写入报告，便于审计。
 
+### 7.7 沙箱隔离检查（M4，默认关闭）
+
+触发模式（`--sandbox`）：
+
+- `off`（默认）：不调用 Docker，`Assessment.sandbox = None`
+- `auto`：仅当静态扫描 `risk in {high, critical}` 时运行
+- `all`：对所有已扫描候选运行；裸 `--sandbox` 等价于 `all`
+
+执行前先 `docker info --format '{{.ServerVersion}}'`。不可用时写 warning 并记录
+`SandboxStatus.UNAVAILABLE`，**不改变结论**。
+
+容器参数固定为：
+
+- `--network none`、`--read-only`、`/tmp` 为 `noexec,nosuid` tmpfs
+- 快照目录只读 bind mount 到 `/src`（`--mount type=bind,...,readonly`）
+- `--cap-drop ALL`、`--security-opt no-new-privileges`、`--user 65534:65534`
+- `--memory` / `--memory-swap`、`--cpus`、`--pids-limit`、`--ulimit nofile`
+- `--pull=never`，不自动拉镜像
+- 不挂 Docker socket，不用 `--privileged`，不用宿主网络 / PID
+
+容器内运行 ReuseGuard 自己的固定探测脚本，只做四件事：`stat` 文件、验证 `/src`
+不可写、验证 `/tmp` 可写、验证网络不可达。**不 import / 安装 / 执行仓库代码。**
+
+超时（默认 20s）后执行 `docker rm -f <name>`；退出码 137 记为 `oom_suspected`
+启发式标记。`containment_ok` 需要同时满足“`/src` 不可写 + 网络不可达 + 挂载可读”。
+
+结论层只追加 caveat，不会因为探测通过而升级为 USE，也不会因为探测失败而把仓库
+判为恶意。报告明确写“一次运行、不代表后续版本、不是安全证明”。
+
 ## 8. 安全模型
 
 被检查的仓库是不可信输入。安全边界：
 
-1. **不执行**：不跑安装脚本、测试、构建，不 import 模块。
+1. **不执行**：不跑安装脚本、测试、构建，不 import 模块。沙箱探测只读文件元数据。
 2. **不 clone**：避免 hooks、submodule、仓库本地 config；tarball 由 GitHub 生成。
 3. **解包防护**：见 7.3；解包路径必须位于目标目录内。
 4. **只读扫描**：不修改快照；不跟随 symlink；二进制跳过。
-5. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
+5. **沙箱加固**：默认关闭；仅在显式模式下调用 Docker。argv 列表、`shell=False`，
+   固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂
+   Docker socket，不用 `--privileged`，不自动 pull。挂载源拒绝文件系统根、home
+   及其祖先、含逗号 / 换行的路径。
+6. **网络边界**：只访问 `api.github.com`、`codeload.github.com`、
    `api.securityscorecards.dev`。不调用 LLM，不上传内容。
-6. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
+7. **凭据**：token 只从 `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token` 读取；
    不写入报告、不打印、不落盘。
-7. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
-   `|` 会转义。
+8. **报告注入**：仓库描述、finding 证据等用户可控文本会做 HTML 转义；表格中的
+   `|` 会转义。容器探测输出同样按不可信数据处理。
 
 剩余风险：
 
 - tarball 下载和解压仍消耗磁盘 / 带宽；已有大小上限，但不是硬隔离。
-- 静态扫描存在漏报；动态行为未验证。
+- 静态扫描存在漏报；沙箱当前只验证隔离，不观察仓库行为。
+- 沙箱依赖本机 Docker daemon、容器运行时和本地镜像；这些仍是信任边界。
 - 私有仓库的 tarball 访问需要 token；当前实现不向 codeload 发送 token，
   因此私有仓库可能下载失败（会降级为 scan error → INSPECT）。
 - Scorecard 只覆盖公开、被索引的仓库。
@@ -284,9 +320,12 @@ scan risk low/none:
   - 锁文件 / `node_modules` / 二进制跳过
   - 文件数截断 / 大文件跳过
 - 快照测试构造恶意 tar：`../`、绝对路径、symlink、hardlink、Windows 保留名。
+- 沙箱测试全部使用 `FakeCommandRunner` / fake detector：不启动 Docker、不执行
+  不可信代码。覆盖检测失败、超时清理、非零退出、坏 JSON、`containment_ok` 失败、
+  触发策略（off / auto / all）、不可用降级和 CLI 参数校验。
 - 结论测试覆盖 7.5 的每条分支。
-- CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码。
-- 真实网络只用于手动验收，不进入默认 CI。
+- CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码、`--sandbox` 参数组合。
+- 真实网络和真实 Docker 只用于手动验收，不进入默认 CI。
 
 手动验收命令：
 
@@ -296,6 +335,7 @@ reuseguard check elastic/elasticsearch-py --limit 0
 reuseguard check tconbeer/harlequin --limit 0
 reuseguard check --idea "fast HTTP client with retries" --language Python --limit 3
 reuseguard check psf/requests --config examples/reuseguard.yaml
+reuseguard check psf/requests --no-recall --sandbox all
 ```
 
 ## 10. 里程碑
@@ -307,14 +347,15 @@ reuseguard check psf/requests --config examples/reuseguard.yaml
   - 关键词提取、宽/窄两条查询、关键词覆盖率排序
   - `Report.seed` 可为空，报告头使用 `Idea:`
 - **M4**：隔离动态验证
-  - 已完成：安全骨架
+  - 已完成：安全骨架 + CLI / pipeline 接入
     - `adapters/sandbox.py`：Docker 可用性检测、加固命令计划、容器内隔离探测
-    - `SandboxReport` / `SandboxStatus` 数据契约
+    - `SandboxReport` / `SandboxStatus` 数据契约，`Assessment.sandbox`
     - 只读 bind mount、`--network none`、cap-drop、no-new-privileges、非 root、
       内存 / CPU / PID / 超时限制、超时杀容器
     - 探测脚本只 `stat` 文件并验证隔离，不执行仓库代码
-  - 待办：pipeline / CLI 接入、high/critical 或 `--sandbox` 触发、报告区块、
-    真实 Docker 冒烟验收
+    - `--sandbox off|auto|all`、`--sandbox-image`、`--sandbox-timeout`；默认 off
+    - 报告“Sandbox”区块与 summary 列；结论只加 caveat，不升级也不判恶意
+  - 待办：真实 Docker 手动冒烟验收；在沙箱内执行仓库行为（安装 / 导入 / 测试）
   - 边界：单次运行只代表当次容器配置，不是“无害证明”
 - **M5**：外部扫描器
   - 统一 `Finding` schema
@@ -337,7 +378,10 @@ reuseguard check psf/requests --config examples/reuseguard.yaml
 | pickle 等级 | medium | 本地缓存等合法用法常见；单独出现不应直接 AVOID |
 | `--no-scorecard` | 结论最多 INSPECT | 没有信誉证据时不应给 USE |
 | 策略文件 | 严格 YAML + 未知 key 报错 | 拼写错误不应静默放宽安全策略 |
-| 动态验证 | v0.2 不做 | 成本高、边界复杂；先验证静态链路 |
+| 动态验证 | v0.3 只做容器隔离探测，默认关闭 | 先证明隔离配置可用，不在沙箱里执行不可信代码 |
+| 沙箱触发 | `off` / `auto` / `all` 三态 | 默认零副作用；high/critical 与显式请求都能覆盖 |
+| 沙箱失败 | 只写 warning，不改变结论 | 隔离失败是环境证据，不是仓库恶意证据 |
+| 沙箱镜像 | 不自动 pull，`--pull=never` | 避免隐式联网和镜像供应链副作用 |
 
 ## 12. 开放问题
 
@@ -346,9 +390,11 @@ reuseguard check psf/requests --config examples/reuseguard.yaml
 3. **正则误报**：是否需要基于 AST 的规则来区分 `pickle.load` 的来源？
 4. **Scorecard 覆盖**：未收录仓库只能 INSPECT，是否提供本地 `scorecard` CLI 回退？
 5. **沙箱**：Docker / gVisor 的可用性检测、超时、网络隔离怎么做？
-   已定方向（M4 骨架）：只支持本机 Docker daemon；`--network none`、只读 bind
-   mount、`--cap-drop ALL`、`--security-opt no-new-privileges`、非 root、资源上限、
-   超时杀容器；不挂 docker socket。gVisor / runsc 仍待评估。
+   已定方向（M4 骨架 + CLI）：只支持本机 Docker daemon；`--network none`、只读
+   bind mount、`--cap-drop ALL`、`--security-opt no-new-privileges`、非 root、
+   资源上限、超时杀容器；不挂 docker socket。gVisor / runsc 仍待评估。
+6. **沙箱行为探测**：是否/如何执行安装脚本、导入模块或运行测试，同时保证
+   “单次运行”不被误读为安全证明？需要固定的探针协议和输出上限。
 6. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
 7. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
 

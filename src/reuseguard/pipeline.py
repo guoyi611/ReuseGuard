@@ -7,6 +7,7 @@ and stages do that work.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -21,6 +22,15 @@ import httpx
 
 from . import __version__
 from .adapters.github import GitHubClient
+from .adapters.sandbox import (
+    CommandRunner,
+    DockerStatus,
+    SandboxError,
+    SandboxLimits,
+    detect_docker,
+    run_command,
+    run_probe,
+)
 from .adapters.scanner import ScanLimits, scan_directory
 from .adapters.scorecard import ScorecardClient
 from .adapters.snapshot import Snapshot, SnapshotError, SnapshotTooLarge, fetch_snapshot
@@ -33,12 +43,15 @@ from .models import (
     RepoMeta,
     RepoRef,
     Report,
+    RiskLevel,
+    SandboxReport,
+    SandboxStatus,
     ScanReport,
     ScanStatus,
 )
 from .stages.recall import recall_idea, recall_similar
 from .stages.reputation import evaluate_reputation
-from .stages.verdict import decide
+from .stages.verdict import add_sandbox_caveat, decide
 
 logger = logging.getLogger("reuseguard")
 
@@ -55,6 +68,8 @@ class Pipeline:
         snapshot_client: httpx.Client | None = None,
         scan_fn: Callable[..., ScanReport] = scan_directory,
         snapshot_fn: Callable[..., Snapshot] = fetch_snapshot,
+        sandbox_runner: CommandRunner = run_command,
+        sandbox_detect: Callable[..., DockerStatus] = detect_docker,
     ) -> None:
         self.settings = settings
         self.github = github
@@ -62,6 +77,8 @@ class Pipeline:
         self._snapshot_client = snapshot_client
         self._scan_fn = scan_fn
         self._snapshot_fn = snapshot_fn
+        self._sandbox_runner = sandbox_runner
+        self._sandbox_detect = sandbox_detect
 
     def run(self, seed_ref: RepoRef) -> Report:
         started = time.monotonic()
@@ -140,6 +157,10 @@ class Pipeline:
         query: str | None,
     ) -> Report:
         workdir = Path(tempfile.mkdtemp(prefix="reuseguard-"))
+        # The sandbox runs as an unprivileged user, so the snapshot chain must be
+        # traversable. Nothing in the snapshot is world-writable.
+        with contextlib.suppress(OSError):
+            os.chmod(workdir, 0o755)
         logger.debug("Working directory: %s", workdir)
 
         active_client = self._snapshot_client
@@ -167,13 +188,19 @@ class Pipeline:
                 )
                 if filter_result.status is FilterStatus.SKIPPED:
                     logger.info("  reputation filter rejected the repository")
-                scan = self._scan(candidate.repo, workdir, filter_result, warnings, active_client)
+                scan, snapshot_root = self._scan(
+                    candidate.repo, workdir, filter_result, warnings, active_client
+                )
+                sandbox = self._maybe_sandbox(
+                    candidate.repo, snapshot_root, scan, filter_result, warnings
+                )
                 verdict = decide(
                     candidate.repo,
                     filter_result,
                     scan,
                     use_scorecard_min=self.settings.use_scorecard_min,
                 )
+                add_sandbox_caveat(verdict, sandbox)
                 logger.info(
                     "  -> %s (scan: %s, scorecard: %s)",
                     verdict.decision.value.upper(),
@@ -186,6 +213,7 @@ class Pipeline:
                         filter=filter_result,
                         scan=scan,
                         verdict=verdict,
+                        sandbox=sandbox,
                     )
                 )
 
@@ -217,16 +245,23 @@ class Pipeline:
         filter_result: FilterResult,
         warnings: list[str],
         client: httpx.Client,
-    ) -> ScanReport:
+    ) -> tuple[ScanReport, Path | None]:
+        """Return the static scan and the snapshot root it examined, if any."""
         if not self.settings.enable_scan:
-            return ScanReport(
-                status=ScanStatus.DISABLED,
-                error="Static scanning disabled with --no-scan.",
+            return (
+                ScanReport(
+                    status=ScanStatus.DISABLED,
+                    error="Static scanning disabled with --no-scan.",
+                ),
+                None,
             )
         if filter_result.status is FilterStatus.SKIPPED:
-            return ScanReport(
-                status=ScanStatus.SKIPPED,
-                error="Skipped because the reputation filter rejected the repository.",
+            return (
+                ScanReport(
+                    status=ScanStatus.SKIPPED,
+                    error="Skipped because the reputation filter rejected the repository.",
+                ),
+                None,
             )
 
         destination = workdir / repo.full_name.replace("/", "__")
@@ -240,12 +275,12 @@ class Pipeline:
                 client=client,
             )
         except SnapshotTooLarge as exc:
-            return ScanReport(status=ScanStatus.SKIPPED, error=str(exc))
+            return ScanReport(status=ScanStatus.SKIPPED, error=str(exc)), None
         except (SnapshotError, OSError) as exc:
-            return ScanReport(status=ScanStatus.ERROR, error=str(exc))
+            return ScanReport(status=ScanStatus.ERROR, error=str(exc)), None
         except Exception as exc:  # noqa: BLE001 - one bad candidate must not abort the run
             logger.debug("snapshot failed for %s", repo.full_name, exc_info=True)
-            return ScanReport(status=ScanStatus.ERROR, error=f"snapshot failed: {exc}")
+            return ScanReport(status=ScanStatus.ERROR, error=f"snapshot failed: {exc}"), None
 
         if snapshot.stats.skipped_unsafe:
             warnings.append(
@@ -263,7 +298,7 @@ class Pipeline:
             max_total_bytes=self.settings.max_scan_mb * 1024 * 1024,
         )
         try:
-            return self._scan_fn(
+            scan = self._scan_fn(
                 snapshot.root,
                 limits=limits,
                 disabled_rules=self.settings.disabled_rules,
@@ -272,7 +307,87 @@ class Pipeline:
             )
         except Exception as exc:  # noqa: BLE001 - a scanner bug must not crash the run
             logger.debug("scanner failed for %s", repo.full_name, exc_info=True)
-            return ScanReport(status=ScanStatus.ERROR, error=f"scanner failed: {exc}")
+            return ScanReport(status=ScanStatus.ERROR, error=f"scanner failed: {exc}"), None
+        return scan, snapshot.root
+
+    def _maybe_sandbox(
+        self,
+        repo: RepoMeta,
+        snapshot_root: Path | None,
+        scan: ScanReport,
+        filter_result: FilterResult,
+        warnings: list[str],
+    ) -> SandboxReport | None:
+        """Run the opt-in containment probe, subject to the trigger policy.
+
+        This never executes code from the repository: see
+        :mod:`reuseguard.adapters.sandbox`. Sandbox evidence is recorded for one
+        run only and does not change the verdict.
+        """
+        mode = self.settings.sandbox_mode
+        if mode == "off":
+            return None
+        if scan.status is not ScanStatus.SCANNED or snapshot_root is None:
+            return None
+        if filter_result.status is FilterStatus.SKIPPED:
+            return None
+        if mode == "auto" and scan.risk not in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
+            logger.debug("sandbox skipped for %s: risk is %s", repo.full_name, scan.risk.value)
+            return None
+
+        try:
+            limits = SandboxLimits(
+                image=self.settings.sandbox_image,
+                memory_mb=self.settings.sandbox_memory_mb,
+                cpus=self.settings.sandbox_cpus,
+                pids_limit=self.settings.sandbox_pids_limit,
+                timeout_seconds=self.settings.sandbox_timeout,
+            )
+        except SandboxError as exc:
+            warnings.append(f"{repo.full_name}: sandbox configuration is invalid: {exc}")
+            return SandboxReport(status=SandboxStatus.ERROR, error=str(exc))
+
+        availability = self._sandbox_detect(runner=self._sandbox_runner)
+        if not availability.available:
+            reason = availability.reason or "Docker is not available"
+            logger.warning("  sandbox unavailable: %s", reason)
+            warnings.append(f"{repo.full_name}: sandbox unavailable ({reason}).")
+            return SandboxReport(
+                status=SandboxStatus.UNAVAILABLE,
+                image=limits.image,
+                error=reason,
+            )
+
+        logger.info("  running sandbox containment probe (%s)", limits.image)
+        try:
+            sandbox = run_probe(snapshot_root, limits=limits, runner=self._sandbox_runner)
+        except SandboxError as exc:
+            warnings.append(f"{repo.full_name}: sandbox could not start: {exc}")
+            return SandboxReport(
+                status=SandboxStatus.ERROR,
+                image=limits.image,
+                error=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - a sandbox bug must not abort the run
+            logger.debug("sandbox failed for %s", repo.full_name, exc_info=True)
+            warnings.append(f"{repo.full_name}: sandbox failed: {exc}")
+            return SandboxReport(
+                status=SandboxStatus.ERROR,
+                image=limits.image,
+                error=f"sandbox failed: {exc}",
+            )
+
+        if sandbox.status is not SandboxStatus.COMPLETED:
+            warnings.append(
+                f"{repo.full_name}: sandbox probe did not complete "
+                f"({sandbox.status.value}): {sandbox.error or 'no detail'}."
+            )
+        elif sandbox.containment_ok is not True:
+            warnings.append(
+                f"{repo.full_name}: sandbox containment checks did not pass; "
+                "treat the run as untrusted."
+            )
+        return sandbox
 
 
 def remove_tree(path: Path) -> None:

@@ -34,6 +34,7 @@ DEFAULT_MEMORY_MB = 256
 DEFAULT_CPUS = 0.5
 DEFAULT_PIDS_LIMIT = 64
 DEFAULT_TIMEOUT_SECONDS = 20.0
+SANDBOX_MODES = ("off", "auto", "all")
 
 MOUNT_TARGET = "/src"
 _TMPFS_MOUNT = "/tmp:rw,noexec,nosuid,size=64m"

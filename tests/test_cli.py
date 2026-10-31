@@ -134,3 +134,80 @@ def test_check_requires_exactly_one_input(capsys: pytest.CaptureFixture[str]) ->
     captured = capsys.readouterr()
     assert "provide" in captured.err
     assert "--no-recall" in captured.err
+
+
+def test_sandbox_flag_parsing() -> None:
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["check", "acme/seed"]).sandbox is None
+    assert parser.parse_args(["check", "acme/seed", "--sandbox"]).sandbox == "all"
+    assert parser.parse_args(["check", "acme/seed", "--sandbox", "auto"]).sandbox == "auto"
+    assert parser.parse_args(["check", "acme/seed", "--sandbox", "off"]).sandbox == "off"
+
+
+def test_sandbox_options_require_the_sandbox_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["check", "acme/seed", "--sandbox-image", "python:3.11-slim"]) == 2
+    assert cli.main(["check", "acme/seed", "--sandbox-timeout", "30"]) == 2
+    assert "require --sandbox" in capsys.readouterr().err
+
+
+def test_sandbox_requires_static_scanning(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["check", "acme/seed", "--sandbox", "--no-scan"]) == 2
+    assert "requires static scanning" in capsys.readouterr().err
+
+
+def test_sandbox_rejects_invalid_image(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--sandbox", "--sandbox-image", "bad image"])
+
+    assert code == 2
+    assert "invalid sandbox image" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0.5", "601"])
+def test_sandbox_timeout_must_be_in_range(value: str) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["check", "acme/seed", "--sandbox", "--sandbox-timeout", value])
+
+    assert excinfo.value.code == 2
+
+
+def test_sandbox_settings_are_forwarded_to_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "sandbox.md"
+    report = build_demo_report()
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return report
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--sandbox",
+            "auto",
+            "--sandbox-image",
+            "python:3.12-slim",
+            "--sandbox-timeout",
+            "30",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.sandbox_mode == "auto"
+    assert settings.sandbox_image == "python:3.12-slim"
+    assert settings.sandbox_timeout == 30.0

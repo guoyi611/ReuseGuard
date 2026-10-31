@@ -3,8 +3,8 @@
 > 最后更新：2026-10-31
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
-> 当前版本：`0.2.0`
-> 基线提交：`292c422 feat: add YAML policy configuration`（本文件单独提交在其后）
+> 当前版本：`0.3.0`
+> 基线提交：`385667d feat: add sandbox safety kernel for isolated verification`（M4 第 1 步）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -33,12 +33,12 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M1 | 完成 | 种子 URL → 召回 → Scorecard → 静态扫描 → Markdown |
 | M2 | 完成 | JSON、`--fail-on`、误报抑制、离线 demo、测试、CI、打包 |
 | M3 | 完成 | `--idea` 自然语言输入、关键词召回与排序、`Report.seed=None` |
-| M4 | **进行中** | 隔离动态验证：安全骨架已落地（Docker 检测、加固命令、容器内探测），尚未接入 pipeline |
+| M4 | **进行中（骨架完成）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；**不在沙箱内执行仓库代码**，真实 Docker 冒烟待做 |
 | M5 | **未开始** | Semgrep / OSV / gitleaks 外部扫描器适配 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**172 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script。
+当前测试：**195 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script（0.3.0 待重建验证）。
 
 ## 3. 代码地图
 
@@ -54,18 +54,19 @@ src/reuseguard/
 │   ├── github.py       # GitHub REST 元数据 + search
 │   ├── scorecard.py    # OpenSSF Scorecard API
 │   ├── snapshot.py     # codeload 下载 + 安全解包
-│   └── scanner.py      # 内置规则、KNOWN_RULE_IDS、策略参数
+│   ├── scanner.py      # 内置规则、KNOWN_RULE_IDS、策略参数
+│   └── sandbox.py      # Docker 检测 + 加固 docker run + 隔离探测
 └── stages/
     ├── recall.py       # seed 召回 + idea 召回 + 相似度
     ├── reputation.py   # Scorecard → FilterResult
-    └── verdict.py      # Filter + Scan → Verdict
+    └── verdict.py      # Filter + Scan → Verdict（含 add_sandbox_caveat）
 ```
 
 测试：
 
 ```text
 tests/
-├── fakes.py            # FakeGitHub / FakeScorecard / snapshot 工厂
+├── fakes.py            # FakeGitHub / FakeScorecard / snapshot / FakeCommandRunner
 ├── test_cli.py
 ├── test_config.py
 ├── test_models.py
@@ -74,6 +75,7 @@ tests/
 ├── test_recall.py
 ├── test_report.py
 ├── test_reputation.py
+├── test_sandbox.py
 ├── test_scanner.py
 ├── test_snapshot.py
 └── test_verdict.py
@@ -106,10 +108,10 @@ tests/
    - demo 使用固定日期，避免每天 diff
    - v0.2.0 版本号
 
-## 4.1 本会话 M4 第 1 步：沙箱安全骨架
+## 4.1 本会话 M4：沙箱安全骨架 + 接入
 
-新增 `src/reuseguard/adapters/sandbox.py` 与 `SandboxReport` 数据模型
-（`models.py` 的 `SandboxStatus` / `SandboxReport`），但**尚未接入 pipeline / CLI**：
+新增 `src/reuseguard/adapters/sandbox.py`、`SandboxReport` / `SandboxStatus` 数据模型，
+并接入 pipeline / CLI / report：
 
 - `detect_docker()`：`docker info --format '{{.ServerVersion}}'`，缺失可执行文件、
   守护进程不可达、超时、空版本都降级为 `available=False` + 原因。
@@ -126,8 +128,16 @@ tests/
 - 容器内 `_PROBE_SCRIPT` 是 ReuseGuard 自己的固定脚本：只 `stat` 文件、测试
   `/src` 只读、`/tmp` 可写、`--network none` 下网络不可达。**不 import、不安装、
   不执行仓库代码**。
-- 测试 `tests/test_sandbox.py`：36 个，全部用 `FakeCommandRunner`，不启动 Docker。
-  唯一真实子进程测试只验证缺失可执行文件的降级。
+- 触发：`--sandbox off`（默认）/ `auto`（只跑 high/critical）/ `all`（裸
+  `--sandbox` 等价 all）；`--sandbox-image`、`--sandbox-timeout`（1–600）。
+  Docker 不可用只写 warning，不改变结论；`--sandbox` 与 `--no-scan` 互斥。
+- 报告：summary 新增 `Sandbox` 列；每个仓库新增 `### Sandbox — ...` 区块，展示
+  镜像、耗时、网络、挂载、内存 / CPU / PID、探测结果；失败时明确
+  “containment NOT verified”。结论只追加 caveat，不升级也不判恶意。
+- 版本：0.3.0。
+- 测试 `tests/test_sandbox.py`（36 个）+ pipeline / CLI / report / config 用例，
+  全部用 `FakeCommandRunner` / fake detector，不启动 Docker。唯一真实子进程测试
+  只验证缺失可执行文件的降级。
 
 诚实边界：当前探测验证的是**容器隔离配置**，不是仓库行为。`containment_ok=True`
 不等于仓库安全；报告与文档必须这么写。
@@ -143,6 +153,8 @@ reuseguard demo
 reuseguard check psf/requests --limit 3
 reuseguard check --idea "a fast HTTP client with retries" --language Python --limit 3
 reuseguard check psf/requests --config examples/reuseguard.yaml
+reuseguard check psf/requests --no-recall --sandbox all
+reuseguard check psf/requests --no-recall --sandbox auto --sandbox-timeout 30
 ```
 
 需要 token 时：
@@ -171,7 +183,8 @@ python -m build
 - **误报抑制**：docs/tests/examples/fixtures 降权；vendor/generated/minified 跳过。
 - **风险分级**：critical/high → AVOID；medium → INSPECT；低风险 + Scorecard ≥ 5
   且扫描完整 → USE。
-- **动态验证尚未实现**：v0.2 明确不做，不能在文档里暗示已有沙箱。
+- **沙箱默认关闭且不执行仓库代码**：只验证容器隔离配置；Docker 不可用只降级为
+  warning + `UNAVAILABLE`，不改变结论。`containment_ok=True` 不是“无害证明”。
 
 ## 7. 已知问题 / 雷区
 
@@ -199,30 +212,47 @@ python -m build
 6. **`.tools/`、`.venv/`、`dist/`、`reports/` 都是本地生成物**，已 gitignore。
    不要提交。
 
-## 8. 下一步建议：M4 隔离动态验证
+7. **沙箱没有做真实 Docker 验收**：当前测试全部用 fake runner。真实运行时注意：
+   - 镜像必须已在本地（`--pull=never`，不会自动 pull）；缺失会记为 sandbox error。
+   - 容器以 uid 65534 运行，pipeline 会把 workdir chmod 到 755；如果手工调用
+     `run_probe()`，快照目录必须对该用户可读，否则 `containment_ok=False`。
+   - Windows / Docker Desktop 的 bind mount 权限语义与 Linux 不同，需要在目标平台
+     单独冒烟。
+   - 超时只保证杀掉容器；宿主机 Docker daemon 卡死时 `docker rm -f` 也可能超时。
 
-目标：对 high/critical 或用户显式要求的高风险候选，在容器里观察行为。**默认关闭**，
-绝不在宿主机执行被检查代码。
+## 8. 下一步建议：M4 收尾 / 行为探测
 
-建议实现顺序：
+现状：安全骨架 + CLI / pipeline / 报告已完成。目标仍是“对 high/critical 或用户
+显式要求的高风险候选，在容器里观察行为”，**默认关闭**，绝不在宿主机执行被检查代码。
+
+已完成：
 
 1. ~~新增 `adapters/sandbox.py`~~ **（已完成）**：
-   - `DockerSandbox`，检测 `docker info` 是否可用
-   - 运行参数：`--network none`、只读挂载快照、`--memory`、`--cpus`、`--pids-limit`、
-     `--read-only`、`--tmpfs /tmp`、超时杀容器
+   - `detect_docker()`，检测 `docker info` 是否可用
+   - `build_plan()`：`--network none`、只读挂载快照、`--memory`、`--cpus`、
+     `--pids-limit`、`--read-only`、`--tmpfs /tmp`、超时杀容器
    - 不挂载 docker socket，不使用 `--privileged`
    - 记录 stdout/stderr、退出码、超时、OOM 标记
    - **不要**把执行结果当成“无害证明”，只作为行为证据
-2. ~~新增 `SandboxReport` 数据模型~~ **（已完成）**；verdict 输入、`--sandbox` /
-   `--sandbox-image` / `--sandbox-timeout` CLI 参数**待办**，默认关闭
-3. **待办**：只有 `scan.risk in {high, critical}` 或显式 `--sandbox` 才触发
-4. **部分完成**：`tests/test_sandbox.py` 全部用 fake runner；CI 里 Docker 不可用时跳过
-   （当前测试根本不调用 Docker）
-5. **待办**：报告中新增“动态行为”区块，并写明“单次运行、不代表后续版本”
-6. **待办**：README、project.md 同步
+2. ~~新增 `SandboxReport` 数据模型~~ **（已完成）**；verdict caveat、`--sandbox` /
+   `--sandbox-image` / `--sandbox-timeout` CLI 参数**已完成**，默认关闭
+3. ~~只有 `scan.risk in {high, critical}` 或显式 `--sandbox` 才触发~~ **（已完成）**：
+   `off` / `auto` / `all` 三态
+4. ~~测试全部用 fake runner~~ **（已完成）**：`tests/test_sandbox.py` 36 个 +
+   pipeline / CLI / report / config 用例，全部不调用 Docker
+5. ~~报告新增沙箱区块~~ **（已完成）**：含“单次运行、不代表后续版本、不执行仓库代码”
+6. ~~README、project.md 同步~~ **（已完成）**
 
-风险：Docker 逃逸、容器镜像本身、挂载路径、网络代理、资源耗尽。宁可先只做
-“检测 Docker 是否可用 + 生成待执行计划”，也不要为了演示执行不可信代码。
+待办（真正的“动态行为”，需要单独设计）：
+
+- 在容器内执行安装 / 导入 / 测试的固定探针协议，输出上限与证据 schema
+- 真实 Docker 手动冒烟验收（本机已有 Docker 时跑一次 `--sandbox all`）
+- 镜像供应链：校验镜像 digest，或要求 `@sha256:` 引用
+- gVisor / runsc 运行时评估
+
+风险：Docker 逃逸、容器镜像本身、挂载路径、网络代理、资源耗尽。当前实现已经做到
+“默认不接触 Docker + 不执行仓库代码”；下一步若要做行为探测，必须先设计固定探针
+协议、输出上限和“单次运行不等于安全”的措辞，再写代码。
 
 ## 9. 下一步建议：M5 外部扫描器
 
@@ -248,14 +278,17 @@ python -m build
 - git log --oneline -5
 - python -m pytest
 - ruff check src tests
-确认基线（main，v0.2.0，136 个测试通过）后再动手。
+确认基线（main，v0.3.0，195 个测试通过）后再动手。
 
-已完成的里程碑：M1、M2、M3（--idea 自然语言输入）、M6（YAML 策略）。
-未完成：M4（隔离动态验证）、M5（Semgrep/OSV/gitleaks 适配）。
+已完成的里程碑：M1、M2、M3（--idea 自然语言输入）、M6（YAML 策略）、
+M4 安全骨架（默认关闭的容器隔离探测，含 CLI / 报告 / fake runner 测试）。
+未完成：M4 的行为探测（在沙箱内执行安装/导入/测试）、M5（Semgrep/OSV/gitleaks 适配）。
 
-请按 HANDOFF.md 第 8、9 节的顺序继续，优先做 M4 的安全骨架（默认关闭、
-Docker 检测、network none、只读挂载、资源/超时限制、fake runner 测试），
-不要把被检查代码在宿主机上执行。每完成一个可验证的小步：
+请按 HANDOFF.md 第 8、9 节的顺序继续。优先做 M5 的 Semgrep 适配器（只解析不执行），
+或先补 M4 的真实 Docker 手动冒烟验收与镜像 digest 校验。不要把被检查代码在宿主机上执行，
+也不要在沙箱里执行仓库代码，除非先完成独立的探针协议与证据边界设计。
+
+每完成一个可验证的小步：
 - 补测试
 - 跑 pytest + ruff
 - 更新 README/project.md/HANDOFF.md

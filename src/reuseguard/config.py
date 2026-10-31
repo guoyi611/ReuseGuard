@@ -13,6 +13,14 @@ from typing import Any
 import yaml
 
 from . import __version__
+from .adapters.sandbox import (
+    DEFAULT_CPUS,
+    DEFAULT_IMAGE,
+    DEFAULT_MEMORY_MB,
+    DEFAULT_PIDS_LIMIT,
+    DEFAULT_TIMEOUT_SECONDS,
+    SANDBOX_MODES,
+)
 from .adapters.scanner import KNOWN_RULE_IDS
 from .models import RiskLevel
 
@@ -179,12 +187,25 @@ class Settings:
     enable_recall: bool = True
     enable_scorecard: bool = True
     enable_scan: bool = True
+    sandbox_mode: str = "off"
+    sandbox_image: str = DEFAULT_IMAGE
+    sandbox_timeout: float = DEFAULT_TIMEOUT_SECONDS
+    sandbox_memory_mb: int = DEFAULT_MEMORY_MB
+    sandbox_cpus: float = DEFAULT_CPUS
+    sandbox_pids_limit: int = DEFAULT_PIDS_LIMIT
     keep_workdir: bool = False
     disabled_rules: frozenset[str] = frozenset()
     severity_overrides: dict[str, RiskLevel] = field(default_factory=dict)
     suppress_paths: tuple[str, ...] = ()
     config_path: str | None = None
     user_agent: str = DEFAULT_USER_AGENT
+
+    def __post_init__(self) -> None:
+        if self.sandbox_mode not in SANDBOX_MODES:
+            raise ValueError(
+                f"invalid sandbox mode {self.sandbox_mode!r}; expected one of "
+                f"{', '.join(SANDBOX_MODES)}"
+            )
 
     def public_dict(self) -> dict[str, Any]:
         """Serialize settings without leaking the token."""

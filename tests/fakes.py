@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -108,3 +109,26 @@ class FakeCommandRunner:
         if self.results:
             return self.results.pop(0)
         return CommandResult(argv=recorded, returncode=1, stderr="no fake result queued")
+
+
+def sandbox_probe_payload(**overrides) -> dict:
+    payload = {
+        "python": "3.11.9",
+        "files": 3,
+        "bytes": 120,
+        "symlinks": 0,
+        "executables": 0,
+        "errors": [],
+        "src_writable": False,
+        "tmp_writable": True,
+        "network_reachable": False,
+        "network_target": "1.1.1.1:443",
+        "src_entries": 2,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def sandbox_probe_output(**overrides) -> str:
+    payload = sandbox_probe_payload(**overrides)
+    return f"REUSEGUARD_PROBE {json.dumps(payload, sort_keys=True)}\n"

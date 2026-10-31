@@ -22,7 +22,8 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 | --- | --- |
 | 一个把已有信号串起来的编排层 | 一个新的漏洞扫描引擎 |
 | 一次命令得到分级结论和证据 | “一键保证安全”的平台 |
-| 对仓库做**只读**静态检查 | 动态沙箱或行为分析（v0.2 不做） |
+| 对仓库做**只读**静态检查 | 完整的行为分析或恶意软件判定 |
+| 可选的容器隔离检查（不执行仓库代码） | 把“没有发现”当成“安全” |
 | 明确写出每个结论的边界 | 用高分暗示“绝对安全” |
 | 可替换适配器的 CLI 工具 | 锁定某个 SaaS 的托管服务 |
 
@@ -30,17 +31,18 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.2.0 是 MVP，已经可用：
+v0.3.0 已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
 - 用 OpenSSF Scorecard 的公开数据做信誉过滤
 - 下载默认分支的只读快照，做静态风险扫描
+- 可选地在容器里验证隔离配置（`--sandbox auto` / `--sandbox all`），默认关闭
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：动态沙箱验证的 CLI 接入（安全骨架已落地，见 [Roadmap](#roadmap)）、
-Semgrep/CodeQL 等外部扫描器接入。
+尚未实现：在沙箱内执行仓库行为（安装、导入、运行测试）、Semgrep/OSV/gitleaks
+等外部扫描器接入。沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。
 
 ## 工作流
 
@@ -60,6 +62,12 @@ GitHub URL       │    GitHub Search API         │──► candidates
                  │ 3. Static scan (read-only)   │
                  │    tarball → safe extract    │──► findings + risk level
                  │    built-in pattern rules    │
+                 └──────────────┬───────────────┘
+                                │
+                 ┌──────────────▼───────────────┐
+                 │ 3b. Sandbox (opt-in)         │
+                 │    docker run, network none, │──► containment evidence
+                 │    read-only mount, limits   │    (not repository behavior)
                  └──────────────┬───────────────┘
                                 │
                  ┌──────────────▼───────────────┐
@@ -115,22 +123,37 @@ reuseguard check --idea "a fast HTTP client with retries and connection pooling"
 
 `--idea` 模式不会评估种子仓库，只返回匹配的候选；排序按关键词覆盖率、语言、活跃度和热度计算。中文需求如果没有可提取的英文关键词，会把原文作为查询词。
 
+想要容器隔离证据时（需要本机 Docker，镜像必须先拉到本地）：
+
+```powershell
+# 只对静态扫描为 high / critical 的候选运行
+reuseguard check psf/requests --sandbox auto
+
+# 对所有已扫描候选运行
+reuseguard check psf/requests --sandbox
+
+reuseguard check psf/requests --sandbox auto `
+  --sandbox-image python:3.11-slim --sandbox-timeout 30
+```
+
+沙箱默认关闭；没有显式开启时 ReuseGuard 不会调用 Docker。
+
 ### 示例输出
 
 ```markdown
-| # | Repository | Role | Stars | Match | Scorecard | Static risk | Verdict |
-|---:|---|---|---:|---:|---:|---|---|
-| 1 | [acme/http-kit](https://github.com/acme/http-kit) | seed | 4,200 | — | 7.8/10 | none | **USE** |
-| 2 | [acme/web-client](https://github.com/acme/web-client) | alternative | 2,800 | 73.6 | 8.1/10 | none | **USE** |
-| 3 | [acme/legacy-http](https://github.com/acme/legacy-http) | alternative | 950 | 58.0 | n/a | none | **INSPECT FIRST** |
-| 4 | [acme/suspicious-helper](https://github.com/acme/suspicious-helper) | alternative | 700 | 44.2 | 6.0/10 | high | **AVOID** |
+| # | Repository | Role | Stars | Match | Scorecard | Static risk | Sandbox | Verdict |
+|---:|---|---|---:|---:|---:|---|---|---|
+| 1 | [acme/http-kit](https://github.com/acme/http-kit) | seed | 4,200 | — | 7.8/10 | none | — | **USE** |
+| 2 | [acme/web-client](https://github.com/acme/web-client) | alternative | 2,800 | 73.6 | 8.1/10 | none | — | **USE** |
+| 3 | [acme/legacy-http](https://github.com/acme/legacy-http) | alternative | 950 | 58.0 | n/a | none | — | **INSPECT FIRST** |
+| 4 | [acme/suspicious-helper](https://github.com/acme/suspicious-helper) | alternative | 700 | 44.2 | 6.0/10 | high | containment ok | **AVOID** |
 ```
 
 完整示例见 [examples/demo-report.md](examples/demo-report.md)（虚构数据，由 `reuseguard demo` 生成）。
 
 ## 结论怎么读
 
-| 结论 | 触发条件（v0.2） | 建议动作 |
+| 结论 | 触发条件（v0.3） | 建议动作 |
 | --- | --- | --- |
 | **USE** | Scorecard ≥ 5.0，扫描完整，无 medium 及以上有效发现，未归档 | 可以进入下一步评估，但仍需读报告 |
 | **INSPECT FIRST** | 有 medium 发现；或 Scorecard 未知 / 被关闭 / < 5；或仓库已归档；或扫描被截断 / 未完成 | 人工看具体文件和原因 |
@@ -176,19 +199,48 @@ reuseguard check --idea "a fast HTTP client with retries and connection pooling"
 - 单文件默认上限 1 MB，单仓库默认上限 2000 个文件 / 20 MB；触发上限会在报告中标记“覆盖不完整”。
 - 规则命中会附带文件、行号、消息和证据，方便人工判断。
 
+## 沙箱隔离检查（可选）
+
+v0.3 增加了一个**默认关闭**的容器隔离检查。它验证 ReuseGuard 的隔离配置是否按预期生效，**不在沙箱里执行仓库代码**：
+
+```text
+--sandbox off    默认：不接触 Docker
+--sandbox auto   只对静态扫描为 high / critical 的候选运行
+--sandbox        裸参数等价于 all：对所有已扫描候选运行
+--sandbox all    显式 all
+```
+
+运行条件与限制：
+
+| 项 | 行为 |
+| --- | --- |
+| Docker | 先执行 `docker info` 检测守护进程；不可用只记 warning，不改变结论 |
+| 镜像 | 默认 `python:3.11-slim`，可用 `--sandbox-image` 覆盖；**不会自动 pull**，镜像必须已在本地 |
+| 网络 | `--network none` |
+| 文件系统 | 容器根只读；快照以只读 bind mount 挂到 `/src`；`/tmp` 是 `noexec,nosuid` 的 tmpfs |
+| 权限 | `--cap-drop ALL`、`--security-opt no-new-privileges`、非 root（uid 65534） |
+| 资源 | 256 MB 内存（含 swap）、0.5 CPU、64 PIDs、`nofile=256` |
+| 超时 | 默认 20 秒，可用 `--sandbox-timeout` 调整（1–600）；超时后 `docker rm -f` 清理 |
+| 禁止项 | 不挂载 Docker socket，不使用 `--privileged`，不使用宿主网络 / PID 命名空间 |
+
+容器里运行的是 ReuseGuard 自己的固定探测脚本：只 `stat` 文件、验证 `/src` 不可写、验证 `/tmp` 可写、验证网络不可达。报告会显示结果和失败项。
+
+> **一次运行、一种配置，不等于安全。** 探测通过只说明这次容器隔离按配置生效；它没有执行仓库代码，不能证明仓库无害，也不代表后续版本。
+
 ## 安全模型
 
 ReuseGuard 自身也按“被检查的代码不可信”来设计：
 
-- **不执行任何被检查的代码。** 不跑安装脚本、不跑测试、不导入模块。
+- **不执行任何被检查的代码。** 不跑安装脚本、不跑测试、不导入模块。沙箱探测只读取文件元数据。
 - **不使用 `git clone`。** 从 `codeload.github.com` 下载默认分支的 tar.gz，避免 hooks、submodule 和仓库本地配置。
 - **安全解包。** 拒绝绝对路径、`..`、Windows 盘符 / 保留名、符号链接、硬链接和设备节点；限制文件数、单文件大小和总解压大小。
 - **不跟随符号链接。** 扫描器只读普通文件，二进制文件跳过。
+- **沙箱是加固后的旁路。** 只有在显式开启时才调用 Docker；命令用 argv 列表拼装（`shell=False`），固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂 Docker socket，不用 `--privileged`，不自动拉镜像。
 - **只访问 GitHub 和 OpenSSF Scorecard。** 不把仓库内容上传给 LLM 或其他第三方。
 - **token 不落盘。** 只从环境变量或 `gh auth token` 读取，不写入报告，不打印。
 - **不在报告里渲染原始 HTML。** 仓库描述等用户可控文本会做 HTML 转义。
 
-已知边界：GitHub 生成的 tarball 本身是可信来源，但仓库内容不可信；静态扫描只覆盖文本文件，不覆盖二进制、vendored 依赖和生成代码。
+已知边界：GitHub 生成的 tarball 本身是可信来源，但仓库内容不可信；静态扫描只覆盖文本文件，不覆盖二进制、vendored 依赖和生成代码。沙箱依赖本机 Docker daemon 与本地镜像，容器运行时本身仍是信任边界。
 
 ## 策略配置
 
@@ -243,6 +295,9 @@ reuseguard --version
 | `--no-recall` | off | 只评估种子仓库（仅 URL 模式） |
 | `--no-scorecard` | off | 关闭信誉过滤（结论会变成 INSPECT） |
 | `--no-scan` | off | 关闭快照下载和静态扫描 |
+| `--sandbox [MODE]` | off | 容器隔离检查：`auto` 只跑 high/critical，`all` 或裸参数跑全部，`off` 关闭 |
+| `--sandbox-image IMAGE` | python:3.11-slim | 沙箱镜像；必须已在本地，不会自动 pull |
+| `--sandbox-timeout SECONDS` | 20 | 单次沙箱运行上限（1–600），超时杀容器 |
 | `--scorecard-min SCORE` | 2.0 | 低于该分数直接跳过 |
 | `--timeout SECONDS` | 20 | 单次网络请求超时 |
 | `--max-repo-mb MB` | 150 | 单仓库下载上限 |
@@ -265,7 +320,8 @@ reuseguard --version
 - 召回依赖 GitHub Search，查询词和限额会影响结果。
 - 不扫描 vendored 依赖、二进制文件、生成代码；这些地方也可能有风险。
 - 结果是运行时刻的快照；之后的新 commit 可能行为不同。
-- v0.2 没有动态沙箱验证。
+- v0.3 的沙箱只验证容器隔离配置，不执行仓库代码；它不能替代行为分析或人工审计。
+- 沙箱需要本机 Docker 守护进程和预拉取的镜像；不可用时只记 warning，不改变结论。
 
 ## 开发
 
@@ -283,8 +339,9 @@ ruff format --check src tests
 - **M1（已完成）**：种子 URL → 召回 → Scorecard → 静态扫描 → Markdown
 - **M2（已完成）**：JSON 输出、`--fail-on`、误报抑制、离线 demo、测试与 CI
 - **M3（已完成）**：`--idea` 自然语言需求输入、关键词召回与排序
-- **M4（进行中）**：高风险项目的隔离动态验证；安全骨架已实现（Docker 检测、
-  加固容器命令、隔离探测、fake runner 测试），CLI 触发与报告待接入
+- **M4（进行中）**：隔离动态验证；已完成安全骨架与 CLI 接入（Docker 检测、
+  加固容器命令、隔离探测、`--sandbox` 触发、报告区块、fake runner 测试），
+  待做“在沙箱内执行仓库行为”
 - **M5**：可插拔外部扫描器（Semgrep、OSV、gitleaks），统一 finding schema
 - **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
 

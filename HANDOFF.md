@@ -4,8 +4,8 @@
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
 > 当前版本：`0.6.0`
-> 基线提交：`c7d0595 feat: add gitleaks secret-scan adapter`（M5 第二步；
-> 本次会话在其上新增 OSV 适配器；M5 第一步为 `c711b42`，M4 基线为 `f39c84b`）
+> 基线提交：`da9ffa4 feat: add OSV dependency-vulnerability adapter`（M5 第三步，
+> M5 完成；第二步 `c7d0595`，第一步 `c711b42`，M4 基线 `f39c84b`）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行

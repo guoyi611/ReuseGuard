@@ -270,6 +270,46 @@ class ScanReport:
         return f"{self.risk.value} risk · {detail} · {self.files_scanned} files"
 
 
+class SandboxStatus(str, Enum):
+    """The outcome of the opt-in isolation probe."""
+
+    DISABLED = "disabled"
+    UNAVAILABLE = "unavailable"
+    COMPLETED = "completed"
+    TIMEOUT = "timeout"
+    ERROR = "error"
+
+
+@dataclass
+class SandboxReport:
+    """Evidence from one container run.
+
+    The current probe verifies the containment configuration (read-only mount,
+    disabled network, resource limits). It does not execute repository code, so
+    a completed run is not evidence that the repository is harmless.
+    """
+
+    status: SandboxStatus
+    image: str | None = None
+    container: str | None = None
+    exit_code: int | None = None
+    duration_seconds: float = 0.0
+    timed_out: bool = False
+    oom_suspected: bool = False
+    containment_ok: bool | None = None
+    mount_target: str = "/src"
+    network: str = "none"
+    memory_mb: int | None = None
+    cpus: float | None = None
+    pids_limit: int | None = None
+    timeout_seconds: float | None = None
+    probe: dict[str, Any] = field(default_factory=dict)
+    stdout_tail: str | None = None
+    stderr_tail: str | None = None
+    error: str | None = None
+    command: list[str] = field(default_factory=list)
+
+
 @dataclass
 class Verdict:
     """A recommendation plus the evidence and caveats behind it."""

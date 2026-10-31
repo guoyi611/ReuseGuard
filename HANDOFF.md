@@ -33,11 +33,11 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M1 | 完成 | 种子 URL → 召回 → Scorecard → 静态扫描 → Markdown |
 | M2 | 完成 | JSON、`--fail-on`、误报抑制、离线 demo、测试、CI、打包 |
 | M3 | 完成 | `--idea` 自然语言输入、关键词召回与排序、`Report.seed=None` |
-| M4 | **未开始** | Docker/gVisor 隔离动态验证 |
+| M4 | **进行中** | 隔离动态验证：安全骨架已落地（Docker 检测、加固命令、容器内探测），尚未接入 pipeline |
 | M5 | **未开始** | Semgrep / OSV / gitleaks 外部扫描器适配 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**136 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+当前测试：**172 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
 wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script。
 
 ## 3. 代码地图
@@ -79,7 +79,7 @@ tests/
 └── test_verdict.py
 ```
 
-## 4. 本次会话实际改动
+## 4. 上一会话实际改动（M3 / M6）
 
 1. **M3 自然语言输入**
    - `check --idea TEXT [--language LANG]`
@@ -105,6 +105,32 @@ tests/
    - `AKIAIOSFODNN7EXAMPLE` 这类文档占位密钥不再触发 high
    - demo 使用固定日期，避免每天 diff
    - v0.2.0 版本号
+
+## 4.1 本会话 M4 第 1 步：沙箱安全骨架
+
+新增 `src/reuseguard/adapters/sandbox.py` 与 `SandboxReport` 数据模型
+（`models.py` 的 `SandboxStatus` / `SandboxReport`），但**尚未接入 pipeline / CLI**：
+
+- `detect_docker()`：`docker info --format '{{.ServerVersion}}'`，缺失可执行文件、
+  守护进程不可达、超时、空版本都降级为 `available=False` + 原因。
+- `build_plan()`：只从允许列表拼 argv（`shell=False`），固定：
+  `--network none`、`--read-only`、`--tmpfs /tmp:rw,noexec,nosuid,size=64m`、
+  `--cap-drop ALL`、`--security-opt no-new-privileges`、`--user 65534:65534`、
+  `--pids-limit`、`--memory` / `--memory-swap`、`--cpus`、`--ulimit nofile`、
+  `--pull=never`、只读 bind mount 到 `/src`。**不挂 docker socket、不用
+  `--privileged`、不用 `--volume`/`-v`**。
+- 挂载源校验：必须存在、是目录、不是文件系统根、不是 home 或其祖先、路径不含逗号
+  或换行（避免破坏 `--mount` 语法）。
+- `run_probe()`：超时杀容器（`docker rm -f <name>`）；记录退出码、耗时、
+  timeout、`oom_suspected`（退出码 137 的启发式标记）。
+- 容器内 `_PROBE_SCRIPT` 是 ReuseGuard 自己的固定脚本：只 `stat` 文件、测试
+  `/src` 只读、`/tmp` 可写、`--network none` 下网络不可达。**不 import、不安装、
+  不执行仓库代码**。
+- 测试 `tests/test_sandbox.py`：36 个，全部用 `FakeCommandRunner`，不启动 Docker。
+  唯一真实子进程测试只验证缺失可执行文件的降级。
+
+诚实边界：当前探测验证的是**容器隔离配置**，不是仓库行为。`containment_ok=True`
+不等于仓库安全；报告与文档必须这么写。
 
 ## 5. 如何运行
 
@@ -180,19 +206,20 @@ python -m build
 
 建议实现顺序：
 
-1. 新增 `adapters/sandbox.py`：
+1. ~~新增 `adapters/sandbox.py`~~ **（已完成）**：
    - `DockerSandbox`，检测 `docker info` 是否可用
    - 运行参数：`--network none`、只读挂载快照、`--memory`、`--cpus`、`--pids-limit`、
      `--read-only`、`--tmpfs /tmp`、超时杀容器
    - 不挂载 docker socket，不使用 `--privileged`
    - 记录 stdout/stderr、退出码、超时、OOM 标记
    - **不要**把执行结果当成“无害证明”，只作为行为证据
-2. 新增 `SandboxReport` 数据模型与 verdict 输入；`--sandbox` / `--sandbox-image` /
-   `--sandbox-timeout` CLI 参数，默认关闭
-3. 只有 `scan.risk in {high, critical}` 或显式 `--sandbox` 才触发
-4. 测试全部用 fake runner，不实际运行 Docker；CI 里 Docker 不可用时跳过
-5. 报告中新增“动态行为”区块，并写明“单次运行、不代表后续版本”
-6. 文档同步：README、project.md、本文件
+2. ~~新增 `SandboxReport` 数据模型~~ **（已完成）**；verdict 输入、`--sandbox` /
+   `--sandbox-image` / `--sandbox-timeout` CLI 参数**待办**，默认关闭
+3. **待办**：只有 `scan.risk in {high, critical}` 或显式 `--sandbox` 才触发
+4. **部分完成**：`tests/test_sandbox.py` 全部用 fake runner；CI 里 Docker 不可用时跳过
+   （当前测试根本不调用 Docker）
+5. **待办**：报告中新增“动态行为”区块，并写明“单次运行、不代表后续版本”
+6. **待办**：README、project.md 同步
 
 风险：Docker 逃逸、容器镜像本身、挂载路径、网络代理、资源耗尽。宁可先只做
 “检测 Docker 是否可用 + 生成待执行计划”，也不要为了演示执行不可信代码。

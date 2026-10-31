@@ -42,11 +42,14 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 输出：Markdown / JSON
 - CLI：`check`、`--idea`、`--config`、`demo`、`--fail-on`、`--keep-workdir`
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
+- 沙箱安全骨架（M4 内部，尚未接入 CLI）：Docker 检测、加固 `docker run` 计划、
+  容器内隔离探测、fake runner 测试
 - 测试：fake adapter，全离线
 
 未实现：
 
-- 动态沙箱验证
+- 动态沙箱验证接入 pipeline / CLI（安全骨架已就绪，触发与报告待做）
+- 在沙箱内执行仓库行为（安装、导入、运行测试）
 - 外部扫描器（Semgrep / OSV / gitleaks）
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
 
@@ -304,8 +307,15 @@ reuseguard check psf/requests --config examples/reuseguard.yaml
   - 关键词提取、宽/窄两条查询、关键词覆盖率排序
   - `Report.seed` 可为空，报告头使用 `Idea:`
 - **M4**：隔离动态验证
-  - 只对 high/critical 或用户显式要求触发
-  - 容器内运行，观察网络 / 文件 / 进程；结果只代表单次运行
+  - 已完成：安全骨架
+    - `adapters/sandbox.py`：Docker 可用性检测、加固命令计划、容器内隔离探测
+    - `SandboxReport` / `SandboxStatus` 数据契约
+    - 只读 bind mount、`--network none`、cap-drop、no-new-privileges、非 root、
+      内存 / CPU / PID / 超时限制、超时杀容器
+    - 探测脚本只 `stat` 文件并验证隔离，不执行仓库代码
+  - 待办：pipeline / CLI 接入、high/critical 或 `--sandbox` 触发、报告区块、
+    真实 Docker 冒烟验收
+  - 边界：单次运行只代表当次容器配置，不是“无害证明”
 - **M5**：外部扫描器
   - 统一 `Finding` schema
   - Semgrep / OSV / gitleaks 适配器，失败可降级
@@ -336,6 +346,9 @@ reuseguard check psf/requests --config examples/reuseguard.yaml
 3. **正则误报**：是否需要基于 AST 的规则来区分 `pickle.load` 的来源？
 4. **Scorecard 覆盖**：未收录仓库只能 INSPECT，是否提供本地 `scorecard` CLI 回退？
 5. **沙箱**：Docker / gVisor 的可用性检测、超时、网络隔离怎么做？
+   已定方向（M4 骨架）：只支持本机 Docker daemon；`--network none`、只读 bind
+   mount、`--cap-drop ALL`、`--security-opt no-new-privileges`、非 root、资源上限、
+   超时杀容器；不挂 docker socket。gVisor / runsc 仍待评估。
 6. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
 7. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
 

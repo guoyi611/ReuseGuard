@@ -39,7 +39,8 @@ v0.2.0 是 MVP，已经可用：
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：动态沙箱验证、Semgrep/CodeQL 等外部扫描器接入。见 [Roadmap](#roadmap)。
+尚未实现：动态沙箱验证的 CLI 接入（安全骨架已落地，见 [Roadmap](#roadmap)）、
+Semgrep/CodeQL 等外部扫描器接入。
 
 ## 工作流
 
@@ -282,7 +283,8 @@ ruff format --check src tests
 - **M1（已完成）**：种子 URL → 召回 → Scorecard → 静态扫描 → Markdown
 - **M2（已完成）**：JSON 输出、`--fail-on`、误报抑制、离线 demo、测试与 CI
 - **M3（已完成）**：`--idea` 自然语言需求输入、关键词召回与排序
-- **M4**：高风险项目的隔离动态验证（容器 / syscall 观察），仅在显式开启时执行
+- **M4（进行中）**：高风险项目的隔离动态验证；安全骨架已实现（Docker 检测、
+  加固容器命令、隔离探测、fake runner 测试），CLI 触发与报告待接入
 - **M5**：可插拔外部扫描器（Semgrep、OSV、gitleaks），统一 finding schema
 - **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
 

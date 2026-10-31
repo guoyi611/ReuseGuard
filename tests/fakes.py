@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from reuseguard.adapters.sandbox import CommandResult
 from reuseguard.adapters.scorecard import ScorecardNotFound
 from reuseguard.adapters.snapshot import ExtractionStats, Snapshot
 from reuseguard.models import RepoMeta
@@ -92,3 +93,18 @@ def make_snapshot(destination: Path, files: dict[str, str]) -> Snapshot:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     return Snapshot(root=root, stats=ExtractionStats(files=len(files)), archive_bytes=100)
+
+
+class FakeCommandRunner:
+    """Records argv lists and replays canned :class:`CommandResult` values."""
+
+    def __init__(self, results: list[CommandResult] | None = None) -> None:
+        self.results = list(results or [])
+        self.calls: list[tuple[tuple[str, ...], float]] = []
+
+    def __call__(self, argv, *, timeout: float) -> CommandResult:
+        recorded = tuple(argv)
+        self.calls.append((recorded, timeout))
+        if self.results:
+            return self.results.pop(0)
+        return CommandResult(argv=recorded, returncode=1, stderr="no fake result queued")

@@ -150,3 +150,11 @@ def test_disabled_scorecard_is_inspect() -> None:
     verdict = decide(make_repo(), _filter(FilterStatus.DISABLED, None), _scan())
 
     assert verdict.decision is Decision.INSPECT
+
+
+def test_decide_does_not_mark_verdicts_withheld() -> None:
+    verdict = decide(make_repo(), _filter(), _scan(status=ScanStatus.DISABLED))
+
+    # Hiding a verdict is a report-level presentation choice, not a decision rule.
+    assert verdict.decision is Decision.INSPECT
+    assert verdict.withheld is False

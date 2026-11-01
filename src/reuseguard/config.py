@@ -187,6 +187,7 @@ class Settings:
     enable_recall: bool = True
     enable_scorecard: bool = True
     enable_scan: bool = True
+    discover_only: bool = False
     semgrep_config: str | None = None
     semgrep_timeout: float = 300.0
     semgrep_rule_timeout: float = 30.0

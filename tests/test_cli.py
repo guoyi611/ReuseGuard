@@ -127,6 +127,58 @@ def test_check_idea_calls_run_idea(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert output.exists()
 
 
+def test_discover_only_requires_disabled_scan(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--discover-only"])
+
+    assert code == 2
+    assert "requires static scanning to be disabled" in capsys.readouterr().err
+
+
+def test_discover_only_settings_are_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "discover.md"
+    report = build_demo_report()
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run_idea(self, _idea, *, language=None):
+            return report
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "--idea",
+            "AI 2D pixel art generator",
+            "--no-scan",
+            "--discover-only",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.discover_only is True
+    assert settings.enable_scan is False
+
+
+def test_discover_only_flag_defaults_off() -> None:
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["check", "acme/seed"]).discover_only is False
+    assert parser.parse_args(["check", "acme/seed", "--discover-only"]).discover_only is True
+
+
 def test_check_requires_exactly_one_input(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["check"]) == 2
     assert cli.main(["check", "acme/seed", "--idea", "x"]) == 2

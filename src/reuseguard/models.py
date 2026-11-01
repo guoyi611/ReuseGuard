@@ -370,12 +370,18 @@ class SandboxReport:
 
 @dataclass
 class Verdict:
-    """A recommendation plus the evidence and caveats behind it."""
+    """A recommendation plus the evidence and caveats behind it.
+
+    ``withheld`` is a presentation flag, not a different decision: discovery
+    mode keeps the computed decision in JSON for auditability but hides it from
+    the Markdown report because no static scan was performed.
+    """
 
     decision: Decision
     confidence: Confidence
     reasons: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    withheld: bool = False
 
 
 @dataclass
@@ -404,6 +410,7 @@ class Report:
     demo: bool = False
     workdir: str | None = None
     query: str | None = None
+    discover_only: bool = False
     schema_version: int = 1
 
     def counts(self) -> dict[str, int]:

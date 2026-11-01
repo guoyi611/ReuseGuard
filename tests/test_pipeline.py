@@ -150,6 +150,26 @@ def test_disabled_scan_needs_no_snapshot() -> None:
     assert calls == []
 
 
+def test_discover_only_withholds_verdict_without_changing_the_decision() -> None:
+    seed = make_repo("acme/seed")
+    github = FakeGitHub(seed, [])
+    scorecard = FakeScorecard({seed.full_name: scorecard_payload(8.0)})
+
+    report = Pipeline(
+        Settings(max_candidates=0, enable_scan=False, discover_only=True),
+        github,
+        scorecard,
+        snapshot_fn=_snapshot_factory([]),
+    ).run(RepoRef.parse("acme/seed"))
+
+    assessment = report.assessments[0]
+    assert report.discover_only is True
+    assert assessment.scan.status is ScanStatus.DISABLED
+    assert assessment.verdict.withheld is True
+    # The decision itself is still computed the same way; only display changed.
+    assert assessment.verdict.decision is Decision.INSPECT
+
+
 def test_no_recall_assesses_only_the_seed() -> None:
     seed = make_repo("acme/seed")
     github = FakeGitHub(seed, [make_repo("acme/other")])

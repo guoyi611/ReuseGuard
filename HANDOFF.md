@@ -3,8 +3,8 @@
 > 最后更新：2026-11-01
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
-> 当前版本：`0.6.0`
-> 基线提交：`ce5664c`（本交接文档更新在 `18c73e2` 之后；以 `git log` 为准）
+> 当前版本：`0.7.0`
+> 基线提交：`bc440f1`（本交接文档更新在发现体验 P0 第一个 commit 之后；以 `git log` 为准）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -37,9 +37,8 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M5 | **完成** | 三个适配器：Semgrep（替换内置）、gitleaks（追加凭据）、osv-scanner（追加依赖漏洞）；统一 Finding、合并、降级/错误边界 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**363 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-v0.6.0 wheel 构建成功，并在干净 venv 中验证过 console script（`reuseguard --version` /
-`demo`）。
+当前测试：**371 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+v0.6.0 wheel 构建和干净 venv 验证已完成（0.7.0 未重新打包）。
 
 ## 3. 代码地图
 
@@ -385,6 +384,75 @@ config / CLI / pipeline / report / verdict：
 测试：`tests/test_recall.py` 新增 4 个（短词、C 家族、任意短词不放开、查询双变体），
 总数 359 → 363；pytest / ruff 全绿。
 
+## 4.9 本会话（2026-11-01）：发现体验 P0 第二步，`--discover-only`
+
+新增 `--discover-only`，版本升到 **0.7.0**。目标是解决 `--no-scan` 时整张表都是
+INSPECT、看起来像“项目都有问题”的噪音；**没有改 `decide()` 的任何判定**。
+
+- CLI：`--discover-only` 必须与 `--no-scan`（或 YAML `features.scan: false`）一起用，
+  否则参数错误退出 2。`Settings.discover_only` 写入 `public_dict()`。
+- 模型：`Verdict.withheld: bool = False`（纯展示标记，decision/confidence 不变）；
+  `Report.discover_only: bool = False`。JSON 因此同时有
+  `discover_only: true`、`verdict.withheld: true`、`scan.status: "disabled"`，
+  机器读者能区分“结论被隐藏”与“扫描没跑”。
+- Pipeline：`decide()` 之后才 `verdict.withheld = True`；`Report.discover_only` 同步。
+- Markdown：
+  - 头部 `**Verdicts:** withheld (no static scan)`；
+  - summary 只保留 `# / Repository / Role / Stars / Match / Scorecard / Verdict`，
+    Verdict 列显示 `—`，去掉 Static risk / Sandbox 列；
+  - 报告写明 `No static scan was performed, so no verdict is given.`；
+  - 每个仓库标题去掉结论，Verdict 区块显示 `### Verdict — withheld`；
+  - Limitations 增加“这是 discovery ranking，不是安全评估”。
+- `--fail-on` 仍按未隐藏的 decision 判断（这是“只影响展示”的直接结果，已在 README /
+  project.md 写明）。
+
+测试 +8（report 3、CLI 3、pipeline 1、verdict 1），总数 363 → 371；pytest / ruff 全绿。
+新增 `test_decide_does_not_mark_verdicts_withheld` 明确锁住“判定不受展示开关影响”。
+
+## 4.10 本会话（2026-11-01）：2D 像素用例重跑（修复后）
+
+用与 `reports/test-pixel-ai-en.md` **完全相同**的查询重跑，并加上新的 `--discover-only`：
+
+```powershell
+python -m reuseguard check --idea "AI pixel art generator stable diffusion" `
+  --no-scan --discover-only --limit 8 -o reports/test-pixel-ai-after.md
+```
+
+结果对比（报告在本机 gitignored）：
+
+| 项 | 修复前 v0.6.0 | 修复后 v0.7.0 |
+| --- | --- | --- |
+| 实际查询 | `pixel art generator stable` / `pixel art` | `ai pixel art generator` / `ai pixel` |
+| `AI` 是否参与 | 否（被丢弃） | 是 |
+| 前几名 | Aseprite / Pixelorama / LibreSprite / git-city | unfake.js / proper-pixel-art / agent-office / Claude-Office / perfectPixel |
+| 相关性 | 纯像素画工具，忽略 AI | AI + 像素相关（修 AI 像素图、AI agent 像素办公室、像素桌面宠物），仍不是文生图模型 |
+| Markdown 展示 | 8 行 INSPECT FIRST | Verdict 列 `—`，`### Verdict — withheld`，写明没有扫描 |
+
+JSON 实测（`--format json --limit 3`）：
+
+```text
+discover_only = true
+scan.status = disabled
+verdict.decision = inspect
+verdict.withheld = true
+queries = ['ai pixel art generator ...', 'ai pixel ...']
+```
+
+**结论：短词 allowlist 生效，AI 真正进入查询；discover-only 的展示和 JSON 标记也符合设计。**
+但结果仍不是“AI 像素图生成器”，原因不是 allowlist，而是 GitHub Search 会把 README 内容
+算进匹配——`ai` / `2d` 这类短词会放大噪音。这是下一层查询策略（P1）问题。
+
+### 重跑时发现的两个新问题（本轮不修，已记入 9.4 / project.md 开放问题）
+
+1. **非法仓库名会崩**：`AI 2D pixel art generator` 真实搜索返回了 `gege-circle/.github`；
+   `evaluate_reputation()` 调 `repo.ref` 时 `RepoRef.parse` 抛 `ValueError`，整次运行
+   traceback 退出 1。和 allowlist 无关（预埋问题），但短词查询更容易撞到。重跑该查询时
+   临时用了 `--no-scorecard` 绕过；正式修复应在召回边界过滤无法解析的 `full_name`，
+   并写 warning。
+2. **短词 README 噪音**：`ai 2d pixel art` 会召回 README 里同时出现这些词的大仓库
+   （实测 `china-dictatorship` 排第一）。需要 `in:name,description,topics` 或
+   `--strict-idea` 之类的查询约束，不属于本轮 allowlist。
+
 ## 5. 如何运行
 
 ```powershell
@@ -483,7 +551,8 @@ python -m build
    ```
    更老的 gitleaks（没有 `dir` 命令）会以退出码 126 失败，适配器记为 scan error，不静默降级。
 
-9. **包与测试路径**：`.venv` 里现在装的是 0.6.0 的 **wheel**（不是 editable），所以直接
+9. **包与测试路径**：`.venv` 里现在装的是 0.6.0 的 **wheel**（不是 editable；0.7.0 未重新
+   打包安装），所以直接
    `python -c "import reuseguard"` 用的是安装副本；`python -m pytest` 通过 `pyproject.toml`
    的 `pythonpath = ["src"]` 跑工作区源码，无需 `PYTHONPATH`。改完源码后，控制台命令要重新
    build + install 才会更新；开发时以 pytest 为准。ruff 仍用 `.tools\bin\ruff.exe`。
@@ -611,6 +680,10 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 开发依赖噪音：`--osv` 会把 devDependencies 一起报出来（lodash 119 条），是否加过滤开关。
 - 依赖漏洞等级口径：advisory 标签 vs CVSS，是否本地实现 CVSS v3 或同时显示。
 - 私有仓库 tarball 支持 token。
+- **非法仓库名**（4.10 实测）：召回结果可能是 `owner/.github`；scorecard 调 `repo.ref`
+  会抛 `ValueError`，整次运行退出 1。应在召回边界过滤无法解析的 `full_name` 并写 warning。
+- **短词 README 噪音**（4.10 实测）：`ai 2d pixel art` 会命中 README 里同时包含这些词的
+  大仓库；考虑给 `--idea` 查询加 `in:name,description,topics`，或提供 `--strict-idea`。
 
 ### 9.5 通用约束
 
@@ -619,25 +692,29 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 外部工具都可能被仓库内容影响（配置、忽略文件、白名单）：接入前先问“被检查的仓库能不能
   用它自己的配置让扫描器闭嘴”。gitleaks 和 Semgrep 都已经踩过。
 
-### 9.6 发现体验：P0 修复（下一步优先，2026-11-01）
+### 9.6 发现体验：P0 修复（2026-11-01，已完成）
 
-本轮**不改 M4**，先修“2D 像素 / AI”用例暴露的 P0：
+本轮**不改 M4**，已修“2D 像素 / AI”用例暴露的两个 P0（细节见 4.8 / 4.9）：
 
-1. **短词 allowlist**（`src/reuseguard/stages/recall.py`）
-   - 让 `AI`、`2D`、`3D`、`C#`、`C++` 等进入 `extract_idea_keywords()`；
-   - 用显式 allowlist，不要放开任意 2 字符词或标点；
-   - 补测试：`extract_idea_keywords("AI 2D pixel art generator")` 必须包含 `ai`、`2d`；
-     现有中文 fallback、停用词、普通英文关键词测试不能回归。
-2. **`--discover-only`**（CLI + report + verdict）
-   - 与 `--no-scan` 一起用时，Markdown 的 Verdict 列显示 `—`，只保留 Match / Stars /
-     Scorecard / 活跃度；
-   - 只影响展示，不改变 `decide()` 的判定；JSON 要能看出“结论被隐藏 / 未扫描”；
-   - 报告加一句“没有做静态扫描，不给出结论”；
-   - 补 CLI / report / 结论测试，确保默认行为不变。
+1. **短词 allowlist**（`src/reuseguard/stages/recall.py`）**已完成**
+   - `AI`、`2D`、`3D`、`C#`、`C++`、`Go`、`R` 等进入 `extract_idea_keywords()`；
+   - 显式 allowlist，没有放开任意短词或标点；
+   - 测试覆盖 `AI 2D pixel art generator`、C 家族、任意短词不放开、查询双变体。
+2. **`--discover-only`**（CLI + report + verdict）**已完成**
+   - 与 `--no-scan` 一起用时，Markdown Verdict 列显示 `—`，summary 只保留
+     Match / Stars / Scorecard；
+   - 只影响展示，不改变 `decide()`；JSON 用 `discover_only` / `withheld` /
+     `scan.status=disabled` 标出“结论被隐藏 / 未扫描”；
+   - 报告写 “No static scan was performed, so no verdict is given.”；
+   - CLI / report / pipeline / verdict 测试齐全，默认行为不变。
 
-验收：同一 2D 像素用例重跑，报告可读；pytest + ruff 全绿；单独 commit + push。
+验收结果：同一 2D 像素用例已重跑，见 4.10 和 `reports/test-pixel-ai-after.md` /
+`reports/test-pixel-ai-after.json`（本机，gitignored）；canonical `AI 2D ...` 的
+`reports/test-2d-pixel-after.md` 也生成了（用 `--no-scorecard` 绕开 4.10 的 `.github` 崩溃）。
+pytest 371 passed，ruff 全绿。
 
-后续 P1（本轮不做）：报告显示每条查询的候选来源、`--strict-idea`、`license unknown` 警告。
+后续 P1（下一轮）：先修 4.10 的非法仓库名崩溃；再做报告显示每条查询的候选来源、
+`--strict-idea`（或查询字段约束）、`license unknown` 警告。M4 行为探测仍等用户确认。
 
 ## 10. 旧提示词（M4 设计，历史）
 
@@ -703,42 +780,41 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 每步完成后告诉我改了什么、验证结果和下一步
 ```
 
-## 11. 当前交接提示词（2026-11-01：发现体验 P0）
+## 11. 下一个会话的交接提示词（2026-11-01：发现体验 P1）
 
 把下面这段直接发给下一个对话：
 
 ```text
 继续开发 ReuseGuard（https://github.com/guoyi611/ReuseGuard）。
 
-先读 HANDOFF.md、README.md、project.md、docs/m4-behavior-probe.md；
-再读 reports/test-2d-pixel-zh.md（本机存在；reports/ 已 gitignore）。
+先读 HANDOFF.md 的 4.8 / 4.9 / 4.10、README.md、project.md、docs/m4-behavior-probe.md；
+再读本机 reports/test-pixel-ai-after.md、reports/test-pixel-ai-after.json、
+reports/test-2d-pixel-after.md（reports/ 已 gitignore）。
 
 执行基线：
 - git status
 - git log --oneline -5
 - python -m pytest
 - .\.tools\bin\ruff.exe check src tests
-确认 main / 18c73e2 / v0.6.0 / 359 passed / ruff 全绿后再动手。
+确认 main / v0.7.0 / 371 passed / ruff 全绿后再动手（最新提交以 git log 为准）。
 
-本轮任务：只做“发现体验”P0 两项，不碰 M4 行为探测实现。
+背景：发现体验 P0 已完成（短词 allowlist + --discover-only）。重跑 2D 像素用例后，
+短词确实进入查询，但也暴露了两个新问题（HANDOFF 4.10 / 9.4）：
 
-1) 短词 allowlist（src/reuseguard/stages/recall.py）
-   - 让 AI / 2D / 3D / C# / C++ 等进入 extract_idea_keywords；
-   - 显式 allowlist，不要放开任意短词或标点；
-   - 补测试：extract_idea_keywords("AI 2D pixel art generator") 必须包含 ai、2d；
-     现有中文 fallback、停用词、普通英文关键词测试不能回归。
+A) P0 崩溃（优先）：GitHub 搜索会返回 owner/.github 之类的名字，
+   evaluate_reputation() 里 repo.ref -> RepoRef.parse 抛 ValueError，整次运行退出 1。
+   建议在召回边界（recall_idea / recall_similar）过滤无法解析的 full_name，写 warning，
+   补测试（不能静默丢掉全部结果，也不能让一个坏结果中断整次运行）。
 
-2) --discover-only（CLI + report + verdict）
-   - 与 --no-scan 一起用时，Markdown 的 Verdict 列显示 —，只保留 Match/Stars/Scorecard；
-   - 只影响展示，不改变 decide() 的判定；JSON 要能看出“结论被隐藏 / 未扫描”；
-   - 报告加一句“没有做静态扫描，不给出结论”；
-   - 补 CLI / report / 结论测试，确保默认行为不变。
+B) P1 查询策略：ai / 2d 这类短词会命中 README 里同时出现这些词的大仓库
+   （实测 ai 2d pixel art 召回 china-dictatorship）。考虑给 --idea 查询加
+   in:name,description,topics、记录每个候选来自哪条查询、提供 --strict-idea；
+   license unknown（Aseprite 陷阱）也要在报告里显式提示。
 
 要求：
 - 每个小步补测试、跑 pytest + ruff、更新 README/project.md/HANDOFF、单独 commit + push。
 - 不要用 Docker；不要装新工具；不要改扫描器逻辑；不要用 --config auto；
   不要把“没有发现”写成“安全”。
-- 用 2D 像素用例重跑一次，对比修复前后。
 - M4 行为探测设计仍待用户确认；未确认前不写实现、不在沙箱执行仓库代码。
 
 环境：

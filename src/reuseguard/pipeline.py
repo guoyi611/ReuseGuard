@@ -226,6 +226,10 @@ class Pipeline:
                     use_scorecard_min=self.settings.use_scorecard_min,
                 )
                 add_sandbox_caveat(verdict, sandbox)
+                if self.settings.discover_only:
+                    # Display-only: keep the computed decision for JSON audit,
+                    # but do not present it as a verdict without a scan.
+                    verdict.withheld = True
                 logger.info(
                     "  -> %s (scan: %s, scorecard: %s)",
                     verdict.decision.value.upper(),
@@ -254,6 +258,7 @@ class Pipeline:
                 elapsed_seconds=elapsed,
                 workdir=str(workdir) if self.settings.keep_workdir else None,
                 query=query,
+                discover_only=self.settings.discover_only,
             )
         finally:
             if owns_client:

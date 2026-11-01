@@ -134,6 +134,87 @@ def test_idea_report_uses_query_header_and_keyword_breakdown() -> None:
     assert "No candidate repositories" not in markdown
 
 
+def _discover_only_report() -> Report:
+    repo = RepoMeta(
+        full_name="acme/pixel",
+        html_url="https://github.com/acme/pixel",
+        description="A 2D pixel art generator",
+        stars=10_912,
+    )
+    return Report(
+        tool_version="0.7.0",
+        generated_at=datetime.now(timezone.utc),
+        seed=None,
+        query="AI 2D pixel art generator",
+        discover_only=True,
+        assessments=[
+            Assessment(
+                candidate=Candidate(
+                    repo=repo,
+                    role="candidate",
+                    similarity=Similarity(
+                        total=82.5,
+                        keywords=40.0,
+                        language=10.0,
+                        recency=20.0,
+                        popularity=12.5,
+                    ),
+                ),
+                filter=FilterResult(status=FilterStatus.PASSED, score=7.2),
+                scan=ScanReport(
+                    status=ScanStatus.DISABLED,
+                    error="Static scanning disabled with --no-scan.",
+                ),
+                verdict=Verdict(
+                    decision=Decision.INSPECT,
+                    confidence=Confidence.LOW,
+                    reasons=["Static scanning was disabled, so there is no code-level evidence."],
+                    limitations=["No static scan was performed."],
+                    withheld=True,
+                ),
+            )
+        ],
+        settings={"enable_scan": False, "discover_only": True},
+    )
+
+
+def test_discover_only_markdown_hides_verdicts_and_scan_columns() -> None:
+    markdown = render_markdown(_discover_only_report())
+
+    assert "**Verdicts:** withheld (no static scan)" in markdown
+    assert "No static scan was performed, so no verdict is given." in markdown
+    assert "| # | Repository | Role | Stars | Match | Scorecard | Verdict |" in markdown
+    assert "| Static risk |" not in markdown
+    assert "| Sandbox |" not in markdown
+    assert "| candidate | 10,912 | 82.5 | 7.2/10 | — |" in markdown
+    assert "**INSPECT FIRST**" not in markdown
+    assert "## 1. acme/pixel" in markdown
+    assert "### Verdict — withheld" in markdown
+
+
+def test_discover_only_json_keeps_decision_but_marks_it_withheld() -> None:
+    payload = json.loads(render_json(_discover_only_report()))
+
+    assert payload["discover_only"] is True
+    assert payload["settings"]["discover_only"] is True
+    assessment = payload["assessments"][0]
+    assert assessment["scan"]["status"] == "disabled"
+    assert assessment["verdict"]["decision"] == "inspect"
+    assert assessment["verdict"]["confidence"] == "low"
+    assert assessment["verdict"]["withheld"] is True
+
+
+def test_default_markdown_still_shows_verdicts_and_scan_columns() -> None:
+    markdown = render_markdown(build_demo_report())
+
+    assert (
+        "| # | Repository | Role | Stars | Match | Scorecard | Static risk | Sandbox | Verdict |"
+        in markdown
+    )
+    assert "**AVOID**" in markdown
+    assert "No static scan was performed, so no verdict is given." not in markdown
+
+
 def test_empty_idea_report_is_rendered() -> None:
     report = Report(
         tool_version="0.1.0",

@@ -30,7 +30,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.6.0）
+## 4. 当前状态（v0.7.0）
 
 已实现：
 
@@ -44,8 +44,9 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 外部扫描器：osv-scanner 适配器（`--osv`，lockfile 依赖漏洞、别名合并、追加合并）
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--config`、`--semgrep-config`、`--gitleaks`、`--osv`、
-  `--sandbox`、`demo`、`--fail-on`、`--keep-workdir`
+- CLI：`check`、`--idea`、`--discover-only`（配合 `--no-scan`）、`--config`、
+  `--semgrep-config`、`--gitleaks`、`--osv`、`--sandbox`、`demo`、`--fail-on`、
+  `--keep-workdir`
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
@@ -111,9 +112,9 @@ src/reuseguard/
 | `Finding` | 单条静态发现 | rule_id, severity, path, line, evidence, suppressed |
 | `ScanReport` | 扫描结果 | status, risk, findings, files_scanned, truncated, scanner（合并后可为 `semgrep+gitleaks`） |
 | `SandboxReport` | 一次容器隔离探测的证据 | status, image, exit_code, timed_out, containment_ok, probe, error |
-| `Verdict` | 最终结论 | decision, confidence, reasons, limitations |
+| `Verdict` | 最终结论 | decision, confidence, reasons, limitations, withheld（仅展示层） |
 | `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict, sandbox |
-| `Report` | 一次运行的完整结果 | seed, query, assessments, queries, warnings, settings |
+| `Report` | 一次运行的完整结果 | seed, query, assessments, queries, warnings, settings, discover_only |
 
 `Report.to_dict()` 会递归把 dataclass / Enum / datetime / Path 转成 JSON 类型，并附加
 `counts`。token 永远不会进入 `Report`。
@@ -250,6 +251,20 @@ scan risk low/none:
 - < scorecard_min：连扫描都不做，直接 AVOID
 - scorecard_min–use_scorecard_min：扫描，但结论最多 INSPECT
 - ≥ use_scorecard_min 且扫描干净：USE
+
+#### `--discover-only`（展示层，不改变判定）
+
+`--discover-only` 必须与 `--no-scan`（或 YAML `features.scan: false`）一起使用，否则 CLI
+报参数错误。它只影响 Markdown 展示：
+
+- summary 的 Verdict 列显示 `—`，并去掉 Static risk / Sandbox 列，只保留仓库、Role、
+  Stars、Match、Scorecard；
+- 每个仓库的 Verdict 区块显示 `withheld`，报告写明
+  “No static scan was performed, so no verdict is given.”；
+- `decide()` 完全不变，仍会算出 `INSPECT`；JSON 保留该 `decision`，同时写
+  `Verdict.withheld = true`、`Report.discover_only = true`、`scan.status = "disabled"`，
+  让机器读者能区分“结论被隐藏”与“没有扫描”；
+- `--fail-on` 仍按计算出的结论判断。隐藏结论不是“没有结论”，更不是“安全”。
 
 ### 7.6 策略配置
 
@@ -559,6 +574,10 @@ reuseguard check psf/requests --no-recall --osv
   - `--config PATH`
   - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob
   - 未知 key / 规则 / 类型直接报错
+- **发现体验 P0（2026-11-01，已完成）**：
+  - 短词 allowlist：`AI` / `2D` / `3D` / `C#` / `C++` 等不再被关键词正则丢掉
+  - `--discover-only`：扫描关闭时 Markdown 隐藏结论，JSON 用 `withheld` 标记；
+    不改变 `decide()`
 
 ## 11. 决策记录
 
@@ -578,6 +597,8 @@ reuseguard check psf/requests --no-recall --osv
 | 沙箱失败 | 只写 warning，不改变结论 | 隔离失败是环境证据，不是仓库恶意证据 |
 | 沙箱镜像 | 不自动 pull，`--pull=never` | 避免隐式联网和镜像供应链副作用 |
 | 行为探测（设计） | 默认关闭、显式 `--behavior`、必须 `@sha256:`、每阶段一容器、结论最多 INSPECT | 设计草案待确认；执行不可信代码不能自动化，也不能用一次运行证明安全 |
+| 短词提取 | 显式 allowlist（AI / 2D / C# / C++ 等） | 不放开任意短词或标点，避免把 `ok`、`my` 带进查询 |
+| `--discover-only` | 只改 Markdown 展示，JSON 保留 decision + `withheld` | 判定规则不因展示需求改变；隐藏结论不等于“安全”，也不能让机器读者误以为扫描过 |
 | Semgrep 规则 | 只接受本地路径 | 避免 `--config auto` 隐式联网和规则供应链风险 |
 | Semgrep 缺可选依赖 | 降级内置 + warning | 外部工具不可用不应中断整次评估 |
 | Semgrep 运行失败 | scan error，不静默降级 | 用户显式要求 Semgrep 时，静默换扫描器会掩盖覆盖缺口 |
@@ -619,6 +640,12 @@ reuseguard check psf/requests --no-recall --osv
     是否加“只看生产依赖”的开关，或在报告里把 dev/prod 分层显示？
 14. **依赖漏洞的等级口径**：当前用 advisory 标签；实测 osv-scanner 按 CVSS 会多报一条
     High（GitHub 标 MODERATE、CVSS ≥ 7）。是否本地实现 CVSS v3 计算，或同时显示两种口径？
+15. **短词召回噪音**：`ai` / `2d` 进入查询后，GitHub 会匹配 README，可能召回
+    `china-dictatorship` 这类同时包含这些词的大仓库。是否给 `--idea` 查询加
+    `in:name,description,topics`，或提供 `--strict-idea`？
+16. **非法仓库名**：GitHub 搜索可能返回 `owner/.github`；`RepoRef.parse` 会拒绝它，而
+    scorecard 阶段直接调用 `repo.ref`，导致整次运行抛 `ValueError` 退出 1。是否在召回边界
+    过滤无法解析的 `full_name` 并记 warning？
 
 ## 13. 如何扩展
 

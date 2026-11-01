@@ -31,10 +31,11 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.6.0 已经可用：
+v0.7.0 已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
+- 用 `--discover-only`（配合 `--no-scan`）只看候选，报告隐藏结论、不给出安全判断
 - 用 OpenSSF Scorecard 的公开数据做信誉过滤
 - 下载默认分支的只读快照，做静态风险扫描
 - 可选使用**本地** Semgrep 规则集做外部静态扫描（`--semgrep-config`）
@@ -128,6 +129,22 @@ reuseguard check --idea "a fast HTTP client with retries and connection pooling"
 `--idea` 模式不会评估种子仓库，只返回匹配的候选；排序按关键词覆盖率、语言、活跃度和热度计算。中文需求如果没有可提取的英文关键词，会把原文作为查询词。
 
 关键词提取使用**显式短词 allowlist**：`AI`、`2D`、`3D`、`C#`、`C++`、`Go`、`R`、`JS`、`TS` 等短但有意义的词会保留，不会因为“少于 3 个字符”被丢掉；allowlist 之外的短词和孤立标点仍然忽略，避免把 `ok`、`my` 这类噪音带进查询。
+
+### 只看候选：`--discover-only`
+
+只想先看看“有哪些项目”，不下载快照、也不给出安全结论时：
+
+```powershell
+reuseguard check --idea "AI 2D pixel art generator" --no-scan --discover-only --limit 6
+```
+
+- `--discover-only` **必须和 `--no-scan` 一起用**（YAML 里 `features.scan: false` 也可以）。
+- Markdown 的 Verdict 列显示 `—`，summary 只保留仓库、Role、Stars、Match、Scorecard；每个仓库的 Verdict 区块显示 `withheld`。
+- 报告会明确写“没有做静态扫描，不给出结论”：
+  `No static scan was performed, so no verdict is given.`
+- **只影响展示**：`decide()` 仍按原规则计算结论，JSON 里保留 `decision`，并用
+  `verdict.withheld: true` 和 `discover_only: true` 标出“结论被隐藏、扫描未运行”。
+  `--fail-on` 也仍按计算出的结论判断，只是 Markdown 不展示它。
 
 想要容器隔离证据时（需要本机 Docker，镜像必须先拉到本地）：
 
@@ -408,6 +425,7 @@ reuseguard --version
 | `--no-recall` | off | 只评估种子仓库（仅 URL 模式） |
 | `--no-scorecard` | off | 关闭信誉过滤（结论会变成 INSPECT） |
 | `--no-scan` | off | 关闭快照下载和静态扫描 |
+| `--discover-only` | off | 必须配合 `--no-scan`；Markdown 隐藏结论，JSON 用 `withheld` 标记，只做候选发现 |
 | `--semgrep-config PATH` | — | 用本地 Semgrep 规则文件/目录扫描；绝不使用 `--config auto` |
 | `--semgrep-timeout SECONDS` | 300 | Semgrep 整体进程上限（10–3600） |
 | `--gitleaks` | off | 追加 gitleaks 凭据扫描；不用快照内的 `.gitleaks.toml` / `.gitleaksignore` |
@@ -436,7 +454,8 @@ reuseguard --version
 
 - 静态分析无法证明代码无害；它只能发现已知形态的模式。
 - Scorecard 衡量的是项目实践和卫生，不是具体代码的安全性。
-- 召回依赖 GitHub Search，查询词和限额会影响结果。
+- 召回依赖 GitHub Search，查询词和限额会影响结果。GitHub 搜索会匹配 README，`AI` / `2D` 这类短词可能放大噪音；短词 allowlist 只保证它们不被丢掉，查询策略仍需继续改进。
+- `--discover-only` 只做候选发现，不下载快照、不做静态扫描；报告里隐藏的结论不是安全判断。
 - 不扫描 vendored 依赖、二进制文件、生成代码；这些地方也可能有风险。
 - 结果是运行时刻的快照；之后的新 commit 可能行为不同。
 - v0.3 的沙箱只验证容器隔离配置，不执行仓库代码；行为探测仍是设计草案
@@ -472,6 +491,8 @@ ruff format --check src tests
   gitleaks（凭据、追加）、osv-scanner（依赖漏洞、追加）；统一 `Finding`、
   多扫描器合并、降级与错误边界
 - **M6（已完成）**：YAML 策略配置，支持阈值、限制、规则启停、severity 覆盖和抑制路径
+- **发现体验 P0（已完成）**：短词 allowlist（`AI` / `2D` / `C#` / `C++` 等）和
+  `--discover-only`（扫描关闭时隐藏结论）
 
 设计取舍和阶段规则见 [project.md](project.md)。
 

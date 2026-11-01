@@ -100,6 +100,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable snapshot download and static scanning",
     )
     check.add_argument(
+        "--discover-only",
+        action="store_true",
+        help=(
+            "list candidates without verdicts; requires --no-scan. Markdown hides the "
+            "verdict column, while JSON keeps the decision and marks it as withheld"
+        ),
+    )
+    check.add_argument(
         "--semgrep-config",
         type=Path,
         metavar="PATH",
@@ -310,6 +318,13 @@ def _run_check(args: argparse.Namespace) -> int:
     enable_scorecard = bool(_pick(None, policy.scorecard, True)) and not args.no_scorecard
     enable_scan = bool(_pick(None, policy.scan, True)) and not args.no_scan
 
+    if args.discover_only and enable_scan:
+        print(
+            "error: --discover-only requires static scanning to be disabled; use --no-scan",
+            file=sys.stderr,
+        )
+        return 2
+
     sandbox_mode = args.sandbox or "off"
     if sandbox_mode == "off" and (args.sandbox_image or args.sandbox_timeout is not None):
         print(
@@ -431,6 +446,7 @@ def _run_check(args: argparse.Namespace) -> int:
         enable_recall=enable_recall,
         enable_scorecard=enable_scorecard,
         enable_scan=enable_scan,
+        discover_only=args.discover_only,
         semgrep_config=str(args.semgrep_config) if args.semgrep_config else None,
         semgrep_timeout=semgrep_timeout,
         enable_gitleaks=args.gitleaks,

@@ -39,7 +39,8 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
 当前测试：**359 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-wheel / sdist 构建成功，v0.2.0 在干净 venv 中验证过 console script（0.6.0 待重建验证）。
+v0.6.0 wheel 构建成功，并在干净 venv 中验证过 console script（`reuseguard --version` /
+`demo`）。
 
 ## 3. 代码地图
 
@@ -290,6 +291,26 @@ config / CLI / pipeline / report / verdict：
 - 严格档下，critical/high 的依赖漏洞会让结论变成 AVOID；这是产品选择，不是“项目恶意”。
   报告 caveat 写了“通常可以通过升级修复”。
 
+## 4.5 打包与安装验证（v0.6.0）
+
+- `python -m build --wheel --no-isolation` 构建成功（`dist/reuseguard-0.6.0-py3-none-any.whl`，
+  约 83 KB）：22 个包内模块（含 `gitleaks.py`、`osv.py`）齐全，`entry_points.txt` 为
+  `reuseguard = reuseguard.cli:main`。
+- 在 `.venv` 里 `pip install --no-index --no-deps --force-reinstall dist\*.whl` 后，
+  `reuseguard --version` → 0.6.0，`reuseguard demo` 正常输出。
+- 另建 `python -m venv --system-site-packages .tools\venv-clean`，装同一个 wheel 后
+  console script 与 `demo` 都正常（依赖来自系统 Python，因为本机 pip 连不上 PyPI；
+  验证完已删除该 venv）。
+- `pyproject.toml` 的 pytest 配置加了 `pythonpath = ["src"]`：**`python -m pytest` 现在不用
+  再设 `PYTHONPATH`**，而且保证测试跑的是工作区源码，不是 `.venv` 里安装的 wheel。
+
+环境坑（本机特有，不是项目缺陷）：
+
+- `pip install -e .` 需要 `editables`（hatchling 的 editable 后端依赖）。本机 pip 的网络会
+  挂住（`pip install hatchling` 也一样，而 httpx 访问同一个镜像正常），所以离线做不了
+  editable 安装。用 `--no-build-isolation` 构建 wheel 不受影响。
+- 离线安装一律加 `--no-index`；否则 pip 会去连索引并卡住。
+
 ## 5. 如何运行
 
 ```powershell
@@ -388,8 +409,10 @@ python -m build
    ```
    更老的 gitleaks（没有 `dir` 命令）会以退出码 126 失败，适配器记为 scan error，不静默降级。
 
-9. **Python 包没有装进 `.venv`**：本会话用 `$env:PYTHONPATH="src"` 跑 pytest，ruff 用
-   `.tools\bin\ruff.exe`。直接 `python -m pytest` 会 `ModuleNotFoundError`。
+9. **包与测试路径**：`.venv` 里现在装的是 0.6.0 的 **wheel**（不是 editable），所以直接
+   `python -c "import reuseguard"` 用的是安装副本；`python -m pytest` 通过 `pyproject.toml`
+   的 `pythonpath = ["src"]` 跑工作区源码，无需 `PYTHONPATH`。改完源码后，控制台命令要重新
+   build + install 才会更新；开发时以 pytest 为准。ruff 仍用 `.tools\bin\ruff.exe`。
 
 10. **osv-scanner 2.7.0 已验收**：二进制在 `.tools\scanners\osv-scanner.exe`。两个实测边界：
     - 递归扫描**跳过 `.` 开头的隐藏目录**。快照根目录本身不隐藏，所以正常使用没问题，但
@@ -500,11 +523,12 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 
 ### 9.4 小项（穿插做）
 
-- 0.6.0 wheel / console script 重建验证（上次只验到 v0.2.0）。
 - 外部规则 ID 进入 `rules.disable` / `rules.severity`：给 policy 加“外部规则前缀”白名单，
   不要直接放开任意字符串。
 - `.semgrepignore` 覆盖缺口：是否在隔离副本里删掉它，或改成显式文件列表。
 - OSV 离线数据库模式；`--no-resolve` 是否默认开启（收紧 registry 访问）。
+- 开发依赖噪音：`--osv` 会把 devDependencies 一起报出来（lodash 119 条），是否加过滤开关。
+- 依赖漏洞等级口径：advisory 标签 vs CVSS，是否本地实现 CVSS v3 或同时显示。
 - 私有仓库 tarball 支持 token。
 
 ### 9.5 通用约束
@@ -525,23 +549,40 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - git status
 - git log --oneline -5
 - python -m pytest
-- ruff check src tests
-确认基线（main，v0.6.0，359 个测试通过）后再动手。注意：当前 .venv 里没有安装本包，
-需要用 $env:PYTHONPATH="src" 跑 pytest，ruff 用 .tools\bin\ruff.exe。
+- .\.tools\bin\ruff.exe check src tests
+确认基线（main，v0.6.0，359 个测试通过，CI 绿）后再动手。
 
-已完成的里程碑：M1、M2、M3（--idea）、M4 安全骨架（默认关闭的容器隔离探测）、
-M5 全部三个外部扫描器（Semgrep / gitleaks / osv-scanner）、M6（YAML 策略）。
-未完成：M4 行为探测（在沙箱内执行安装/导入/测试）、真实工具冒烟验收、OSV 离线模式、
-打包后的 console script 重建验证。
+环境说明（本机）：
+- `python -m pytest` 直接可用（pyproject 里配了 pythonpath=src，测试跑工作区源码）。
+  ruff 用 .tools\bin\ruff.exe。
+- 外部扫描器在 .tools\scanners\（gitleaks 8.30.1、osv-scanner 2.7.0，gitignored）。
+  需要时先执行：$env:PATH = "$PWD\.tools\scanners;$env:PATH"
+- 本机 pip 连不上 PyPI（会挂住）；离线安装用 --no-index，构建用
+  `python -m build --wheel --no-isolation`。
 
-请按 HANDOFF.md 第 9 节的顺序继续：
-1. 先问用户要不要在本机安装 gitleaks / osv-scanner 做真实冒烟（装工具属于改动机器）。
-   如果同意，按 9.2 跑真实链路并记录命令、输出、与假设不符的地方。
-2. 写 M4 行为探测的设计文档（9.3），不要直接写代码；探针协议和证据边界先定。
-3. 穿插做 9.4 的小项；每个可验证的小步单独 commit + push。
+已完成：M1–M6。M5 三个扫描器（Semgrep / gitleaks / osv-scanner）全部完成，并用真实二进制
+做过验收；v0.6.0 wheel 已在干净 venv 验证 console script。
 
-不要把被检查代码在宿主机上执行，也不要在沙箱里执行仓库代码，除非先完成独立的
-探针协议与证据边界设计。不要用 `--config auto` 或任何会隐式联网拉规则的路径。
+下一步按 HANDOFF 第 9 节：
+1. **先写 M4 行为探测的设计文档，不要写实现代码。** 用户明确要求：在独立完成“探针协议 +
+   证据边界”设计并经他确认之前，不要在沙箱里执行仓库代码。设计至少覆盖：
+   - 安装 / 导入 / 运行测试分别做什么、以什么身份执行；
+   - 容器内允许的网络与文件系统范围；
+   - stdout/stderr 截断、总时长、文件数、报告大小等输出上限；
+   - 证据 schema（进程、网络连接、文件写入、退出码）如何记录；
+   - “单次运行 ≠ 安全”“行为证据 ≠ 恶意判决”的措辞；
+   - 镜像供应链（digest / @sha256 锁定）；
+   - 超时、OOM、容器逃逸的检测与记录。
+   产出建议放 docs/m4-behavior-probe.md，并在 README / project.md 里链接。
+2. 设计经用户确认后，再问他要不要装 Semgrep / Docker 做剩余冒烟（装工具属于改动机器）。
+3. 穿插做 HANDOFF 9.4 的小项；每个可验证的小步单独 commit + push。
+
+用户的产品选择（别擅自改）：
+- 结论偏严格：critical/high → AVOID；medium → INSPECT。
+- 允许 --osv 联网查询 api.osv.dev（只发包名和版本，不发代码）。
+- 外部工具装在项目内 .tools/，不进系统 PATH。
+
+不要再做的事：重写扫描器逻辑；用 `--config auto`；隐式联网拉规则；把“没有发现”写成“安全”。
 接入任何新扫描器前先问：“被检查的仓库能不能用它自己的配置让扫描器闭嘴？”
 （gitleaks 的 .gitleaks.toml / .gitleaksignore / gitleaks:allow 就是例子。）
 

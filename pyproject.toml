@@ -53,6 +53,8 @@ packages = ["src/reuseguard"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Tests must exercise the working tree, not an installed wheel.
+pythonpath = ["src"]
 markers = [
     "network: tests that call live GitHub or OpenSSF Scorecard services",
 ]

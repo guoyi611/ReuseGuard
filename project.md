@@ -50,6 +50,8 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
 - 测试：fake adapter / fake runner，全离线
+- 打包：v0.6.0 wheel 构建成功，在干净 venv 中验证过 console script
+  （`reuseguard --version` / `demo`）；pytest 用 `pythonpath=src` 测试工作区源码
 - 已验证（Windows）：gitleaks 8.30.1 与 osv-scanner 2.7.0 的真实二进制；装在项目内
   `.tools/scanners/`，不写入系统 PATH，删目录即卸载
 
@@ -482,6 +484,8 @@ osv-scanner scan source --recursive <root> --format json --output-file <tmp>/osv
   抑制、规则禁用/覆盖、截断、坏 JSON / 缺报告 / 超限、缺失二进制降级和 CLI 校验。
 - 结论测试覆盖 7.5 的每条分支。
 - CLI 测试覆盖 `demo`、非法 URL、`--fail-on` 退出码、`--sandbox` 参数组合。
+- `pyproject.toml` 配置 `pythonpath = ["src"]`：`python -m pytest` 始终测试工作区源码，
+  不会被 `.venv` 里安装的 wheel 遮住。
 - 真实网络和真实 Docker 只用于手动验收，不进入默认 CI。
 
 ### 真实二进制验收（2026-10-31，Windows）

@@ -4,8 +4,8 @@
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
 > 当前版本：`0.6.0`
-> 基线提交：`7132b60 build: verify the 0.6.0 wheel and test the source tree`
-> （v0.6.0 文档基线；M5 完成提交 `da9ffa4`，M4 基线 `f39c84b`）
+> 基线提交：`ce5664c docs: clarify behavior probe statuses and limits`
+> （v0.6.0；M4 设计文档已提交；本会话未改代码）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -34,7 +34,7 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M1 | 完成 | 种子 URL → 召回 → Scorecard → 静态扫描 → Markdown |
 | M2 | 完成 | JSON、`--fail-on`、误报抑制、离线 demo、测试、CI、打包 |
 | M3 | 完成 | `--idea` 自然语言输入、关键词召回与排序、`Report.seed=None` |
-| M4 | **进行中（骨架完成）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；**不在沙箱内执行仓库代码**，真实 Docker 冒烟待做 |
+| M4 | **进行中（骨架 + 设计草案，待确认）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；行为探测设计见 `docs/m4-behavior-probe.md`，**用户确认前不实现、不在沙箱内执行仓库代码**；真实 Docker 冒烟待做 |
 | M5 | **完成** | 三个适配器：Semgrep（替换内置）、gitleaks（追加凭据）、osv-scanner（追加依赖漏洞）；统一 Finding、合并、降级/错误边界 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
@@ -332,6 +332,39 @@ config / CLI / pipeline / report / verdict：
 
 下一步：等用户逐条确认文档第 15 节的 6 个决定；确认后才进入实现（文档第 14 节步骤 1）。
 
+## 4.7 本会话（2026-11-01）：2D 像素 / AI 用例测试（仅测试，无代码改动）
+
+用 v0.6.0 的 `--idea --no-scan` 跑了 5 条查询，模拟“2D 像素 + 卡通 + 零基础 + AI 辅助”
+的真实需求。中文报告在本机 `reports/test-2d-pixel-zh.md`（`reports/` 已 gitignore，未提交）。
+
+**结果：**
+
+| 查询 | 结果 |
+| --- | --- |
+| `pixel art editor animation spritesheet` | ✅ 成功；前 3 名 Aseprite / Pixelorama / LibreSprite |
+| `AI pixel art generator stable diffusion` | ❌ 返回的仍是像素画工具，没有 AI 项目 |
+| `stable diffusion pixel art generator` | ⚠️ 找到通用 SD 平台（A1111/InvokeAI 等），不是像素专用 |
+| `pixel art lora` | ❌ 又回到像素画工具 |
+| `godot pixel platformer template beginner` | ❌ 返回工具/特效，不是零基础模板 |
+
+**根因（按优先级）：**
+
+1. **P0 真 bug**：`extract_idea_keywords()` 的正则 `[a-z][a-z0-9-]{2,}` 会丢弃 `AI`、`2D`、
+   `3D`、`C#`、`C++`。实测 `extract_idea_keywords("AI 2D pixel art generator")` →
+   `['pixel', 'art', 'generator']`。
+2. **P0 体验**：`--no-scan` 下所有候选都是 INSPECT，报告噪音大；需要 `--discover-only`
+   （扫描关闭时 Verdict 显示 `—`，只保留 Match / Stars / Scorecard / 活跃度）。
+3. **P1 查询策略**：第二条兜底查询砍到前 2 词，`stable diffusion` / `pixel art` 大类会
+   淹没具体需求；报告没有“候选来自哪条查询”的来源信息。
+4. **P1 许可证**：Aseprite 排第 1，但 `license unknown`；它不是 OSI 开源许可，官方二进制
+   收费（LibreSprite 才是它的开源分支）。ReuseGuard 目前不警告。
+5. **P1 关键词得分**：`template` / `beginner` / `lora` 等具体词没有真正影响排序，
+   排名主要由 Stars / 活跃度主导。
+6. **P2**：Scorecard 对游戏/AI 小众项目覆盖差（大量 `n/a`）；“AI skill / lora”不是
+   GitHub 搜索能直接表达的概念；CLI 没有中文报告输出。
+
+**下一步：先修 P0 两项，再用同一用例重跑对比。** 详细报告见 `reports/test-2d-pixel-zh.md`。
+
 ## 5. 如何运行
 
 ```powershell
@@ -566,7 +599,29 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 外部工具都可能被仓库内容影响（配置、忽略文件、白名单）：接入前先问“被检查的仓库能不能
   用它自己的配置让扫描器闭嘴”。gitleaks 和 Semgrep 都已经踩过。
 
-## 10. 新对话提示词
+### 9.6 发现体验：P0 修复（下一步优先，2026-11-01）
+
+本轮**不改 M4**，先修“2D 像素 / AI”用例暴露的 P0：
+
+1. **短词 allowlist**（`src/reuseguard/stages/recall.py`）
+   - 让 `AI`、`2D`、`3D`、`C#`、`C++` 等进入 `extract_idea_keywords()`；
+   - 用显式 allowlist，不要放开任意 2 字符词或标点；
+   - 补测试：`extract_idea_keywords("AI 2D pixel art generator")` 必须包含 `ai`、`2d`；
+     现有中文 fallback、停用词、普通英文关键词测试不能回归。
+2. **`--discover-only`**（CLI + report + verdict）
+   - 与 `--no-scan` 一起用时，Markdown 的 Verdict 列显示 `—`，只保留 Match / Stars /
+     Scorecard / 活跃度；
+   - 只影响展示，不改变 `decide()` 的判定；JSON 要能看出“结论被隐藏 / 未扫描”；
+   - 报告加一句“没有做静态扫描，不给出结论”；
+   - 补 CLI / report / 结论测试，确保默认行为不变。
+
+验收：同一 2D 像素用例重跑，报告可读；pytest + ruff 全绿；单独 commit + push。
+
+后续 P1（本轮不做）：报告显示每条查询的候选来源、`--strict-idea`、`license unknown` 警告。
+
+## 10. 旧提示词（M4 设计，历史）
+
+> 当前交接请用第 11 节；这一节保留 M4 设计阶段的上下文。
 
 把下面这段直接发给下一个对话：
 
@@ -626,4 +681,51 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 不改动 .github/workflows/ci.yml 的 workflow scope 限制，除非先处理 gh scope
 - 用户不是安全工程师：汇报时先说人话、再说细节，术语要解释
 - 每步完成后告诉我改了什么、验证结果和下一步
+```
+
+## 11. 当前交接提示词（2026-11-01：发现体验 P0）
+
+把下面这段直接发给下一个对话：
+
+```text
+继续开发 ReuseGuard（https://github.com/guoyi611/ReuseGuard）。
+
+先读 HANDOFF.md、README.md、project.md、docs/m4-behavior-probe.md；
+再读 reports/test-2d-pixel-zh.md（本机存在；reports/ 已 gitignore）。
+
+执行基线：
+- git status
+- git log --oneline -5
+- python -m pytest
+- .\.tools\bin\ruff.exe check src tests
+确认 main / ce5664c / v0.6.0 / 359 passed / ruff 全绿后再动手。
+
+本轮任务：只做“发现体验”P0 两项，不碰 M4 行为探测实现。
+
+1) 短词 allowlist（src/reuseguard/stages/recall.py）
+   - 让 AI / 2D / 3D / C# / C++ 等进入 extract_idea_keywords；
+   - 显式 allowlist，不要放开任意短词或标点；
+   - 补测试：extract_idea_keywords("AI 2D pixel art generator") 必须包含 ai、2d；
+     现有中文 fallback、停用词、普通英文关键词测试不能回归。
+
+2) --discover-only（CLI + report + verdict）
+   - 与 --no-scan 一起用时，Markdown 的 Verdict 列显示 —，只保留 Match/Stars/Scorecard；
+   - 只影响展示，不改变 decide() 的判定；JSON 要能看出“结论被隐藏 / 未扫描”；
+   - 报告加一句“没有做静态扫描，不给出结论”；
+   - 补 CLI / report / 结论测试，确保默认行为不变。
+
+要求：
+- 每个小步补测试、跑 pytest + ruff、更新 README/project.md/HANDOFF、单独 commit + push。
+- 不要用 Docker；不要装新工具；不要改扫描器逻辑；不要用 --config auto；
+  不要把“没有发现”写成“安全”。
+- 用 2D 像素用例重跑一次，对比修复前后。
+- M4 行为探测设计仍待用户确认；未确认前不写实现、不在沙箱执行仓库代码。
+
+环境：
+- python -m pytest 直接可用（pythonpath=src）；ruff 用 .\.tools\bin\ruff.exe。
+- 外部扫描器在 .tools\scanners\（本轮不需要）。
+- pip 连不上 PyPI；离线安装 --no-index；构建 python -m build --wheel --no-isolation。
+- 远程 SSH；push 需要 $env:GIT_SSH = (Get-Command ssh).Source。
+
+汇报：先说人话，再说改了什么、验证结果、下一步。
 ```

@@ -80,6 +80,38 @@ _STOPWORDS = frozenset(
     }
 )
 
+# Short search terms that are meaningful on their own. The ordinary keyword
+# regex below requires at least three characters, which silently dropped
+# "AI", "2D", "3D", "C#", and "C++". Keeping an explicit allowlist avoids
+# opening the door to arbitrary two-character noise such as "ok" or "my".
+_SHORT_KEYWORDS = frozenset(
+    {
+        "2d",
+        "3d",
+        "ai",
+        "ar",
+        "c",
+        "c#",
+        "c++",
+        "f#",
+        "go",
+        "js",
+        "ml",
+        "r",
+        "ts",
+        "ui",
+        "ux",
+        "vr",
+    }
+)
+
+_SHORT_KEYWORD_PATTERN = "|".join(
+    re.escape(keyword) for keyword in sorted(_SHORT_KEYWORDS, key=len, reverse=True)
+)
+_KEYWORD_TOKEN_PATTERN = re.compile(
+    rf"(?<![a-z0-9])(?:{_SHORT_KEYWORD_PATTERN})(?![a-z0-9])|[a-z][a-z0-9-]{{2,}}"
+)
+
 _GENERIC_TOPICS = frozenset(
     {
         "api",
@@ -194,7 +226,7 @@ def _extract_keywords_from_text(
     excluded = {item.lower() for item in (exclude or set()) if item}
     keywords: list[str] = []
     seen: set[str] = set()
-    for token in re.findall(r"[a-z][a-z0-9-]{2,}", text.lower()):
+    for token in _KEYWORD_TOKEN_PATTERN.findall(text.lower()):
         if token in _STOPWORDS or token in excluded:
             continue
         if filter_generic and token in _GENERIC_TOPICS:

@@ -141,6 +141,34 @@ def test_extract_idea_keywords_drops_stopwords() -> None:
     assert "want" not in keywords
 
 
+def test_extract_idea_keywords_keeps_short_allowlisted_terms() -> None:
+    keywords = extract_idea_keywords("AI 2D pixel art generator")
+
+    assert "ai" in keywords
+    assert "2d" in keywords
+    assert "pixel" in keywords
+
+
+def test_extract_idea_keywords_keeps_c_family_terms() -> None:
+    keywords = extract_idea_keywords("C++ and C# developer tooling")
+
+    assert "c++" in keywords
+    assert "c#" in keywords
+
+
+def test_extract_idea_keywords_does_not_open_arbitrary_short_words() -> None:
+    keywords = extract_idea_keywords("ok xy ab q zz")
+
+    assert keywords == []
+
+
+def test_build_idea_queries_keeps_short_terms_in_both_variants() -> None:
+    queries = build_idea_queries("AI 2D pixel art generator")
+
+    assert queries[0].startswith("ai 2d pixel art ")
+    assert queries[1].startswith("ai 2d ")
+
+
 def test_build_idea_queries_uses_broad_and_narrow_variants() -> None:
     queries = build_idea_queries(
         "A fast HTTP client with retries",

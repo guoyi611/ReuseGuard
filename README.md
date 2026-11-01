@@ -127,6 +127,8 @@ reuseguard check --idea "a fast HTTP client with retries and connection pooling"
 
 `--idea` 模式不会评估种子仓库，只返回匹配的候选；排序按关键词覆盖率、语言、活跃度和热度计算。中文需求如果没有可提取的英文关键词，会把原文作为查询词。
 
+关键词提取使用**显式短词 allowlist**：`AI`、`2D`、`3D`、`C#`、`C++`、`Go`、`R`、`JS`、`TS` 等短但有意义的词会保留，不会因为“少于 3 个字符”被丢掉；allowlist 之外的短词和孤立标点仍然忽略，避免把 `ok`、`my` 这类噪音带进查询。
+
 想要容器隔离证据时（需要本机 Docker，镜像必须先拉到本地）：
 
 ```powershell

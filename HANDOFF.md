@@ -37,7 +37,7 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M5 | **完成** | 三个适配器：Semgrep（替换内置）、gitleaks（追加凭据）、osv-scanner（追加依赖漏洞）；统一 Finding、合并、降级/错误边界 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**359 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+当前测试：**363 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
 v0.6.0 wheel 构建成功，并在干净 venv 中验证过 console script（`reuseguard --version` /
 `demo`）。
 
@@ -363,6 +363,27 @@ config / CLI / pipeline / report / verdict：
    GitHub 搜索能直接表达的概念；CLI 没有中文报告输出。
 
 **下一步：先修 P0 两项，再用同一用例重跑对比。** 详细报告见 `reports/test-2d-pixel-zh.md`。
+
+## 4.8 本会话（2026-11-01）：发现体验 P0 第一步，短词 allowlist
+
+修 `src/reuseguard/stages/recall.py`：关键词正则原本是
+`[a-z][a-z0-9-]{2,}`，会把 `AI`、`2D`、`3D`、`C#`、`C++` 静默丢掉（2D 像素用例里
+最关键的限定词正好全中）。
+
+- 新增显式 `_SHORT_KEYWORDS` allowlist：`ai`、`2d`、`3d`、`c`、`c#`、`c++`、`f#`、
+  `go`、`r`、`js`、`ts`、`ml`、`ui`、`ux`、`vr`、`ar`；
+- 合并正则先匹配这些短词，再匹配原来的 3 字符以上英文词；边界用
+  `(?<![a-z0-9]) ... (?![a-z0-9])`，不会从 `email` 里抠出 `ai`；
+- **没有**放开任意短词或标点：`extract_idea_keywords("ok xy ab q zz") == []`；
+- 种子模式（`extract_keywords`）共用同一 tokenizer，`go` / `c++` 仍会被
+  `_GENERIC_TOPICS` 过滤，行为不变。
+
+效果：`extract_idea_keywords("AI 2D pixel art generator")` →
+`['ai', '2d', 'pixel', 'art', 'generator']`；查询从
+`pixel art generator stable` / `pixel art` 变成 `ai 2d pixel art ...`。
+
+测试：`tests/test_recall.py` 新增 4 个（短词、C 家族、任意短词不放开、查询双变体），
+总数 359 → 363；pytest / ruff 全绿。
 
 ## 5. 如何运行
 

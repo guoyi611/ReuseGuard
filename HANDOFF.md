@@ -1,11 +1,11 @@
 # ReuseGuard 交接文档
 
-> 最后更新：2026-10-31
+> 最后更新：2026-11-01
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
 > 当前版本：`0.6.0`
-> 基线提交：`da9ffa4 feat: add OSV dependency-vulnerability adapter`（M5 第三步，
-> M5 完成；第二步 `c7d0595`，第一步 `c711b42`，M4 基线 `f39c84b`）
+> 基线提交：`7132b60 build: verify the 0.6.0 wheel and test the source tree`
+> （v0.6.0 文档基线；M5 完成提交 `da9ffa4`，M4 基线 `f39c84b`）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -311,6 +311,27 @@ config / CLI / pipeline / report / verdict：
   editable 安装。用 `--no-build-isolation` 构建 wheel 不受影响。
 - 离线安装一律加 `--no-index`；否则 pip 会去连索引并卡住。
 
+## 4.6 本会话（2026-11-01）：M4 行为探测设计（仅文档）
+
+新增 `docs/m4-behavior-probe.md`，README / project.md / 本文件已链接。**没有写实现代码，
+没有在沙箱里执行仓库代码，没有安装 Docker / Semgrep。**
+
+设计要点（待用户确认，见文档第 15 节）：
+
+- 第一版只跑 `import` + `test`；`install` 推迟到 Tier 2 离线缓存，避免隐式联网。
+- 行为探测必须显式 `--behavior`；`--sandbox auto` 不自动触发。
+- 镜像必须 `IMAGE@sha256:...`，本地已有，`--pull=never`；不内置默认 digest。
+- 宿主侧编排，每个阶段一个容器；退出码 / OOM / 文件差异由宿主采集，容器内不放
+  supervisor（避免被观测代码杀掉采集器）。
+- `/work` 是宿主一次性目录 bind；`/src` 不挂载；rootfs 只读；`--network none`。
+- 证据 schema `reuseguard.behavior/1`；进程/资源采样、文件最终状态、canary、preflight。
+- 输出、时间、文件数、报告大小都有硬上限（文档第 8 节）。
+- 行为证据最多压到 INSPECT；不能自动 AVOID、不能升级 USE、不能提高置信度。
+- 固定措辞：“单次运行 ≠ 安全”“行为证据 ≠ 恶意判决”“进程/资源是采样的”
+  “运行时/内核是信任边界”。
+
+下一步：等用户逐条确认文档第 15 节的 6 个决定；确认后才进入实现（文档第 14 节步骤 1）。
+
 ## 5. 如何运行
 
 ```powershell
@@ -509,7 +530,10 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 
 装工具属于改动机器，**动手前必须问用户**；验收结果要写回本文件 4.x。
 
-### 9.3 M4 行为探测（先设计，不写代码）
+### 9.3 M4 行为探测（设计草案已写，待确认）
+
+**状态：设计草案已完成**（2026-11-01）：`docs/m4-behavior-probe.md`。用户确认前**不要写
+实现代码，也不要在沙箱里执行仓库代码**。README / project.md 已链接。
 
 用户明确要求：在完成独立的探针协议与证据边界设计之前，不要在沙箱里执行仓库代码。设计
 文档至少覆盖：
@@ -520,6 +544,10 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 措辞：“单次运行 ≠ 安全”“行为证据 ≠ 恶意判决”。
 - 镜像供应链：digest 锁定 / 要求 `@sha256:` 引用。
 - 失败与逃逸：超时、OOM、容器逃逸的检测与记录。
+
+以上内容均已覆盖；文档另包含威胁模型、每阶段一个容器的宿主侧架构、证据可信度分级、
+`reuseguard.behavior/1` JSON schema、CLI/报告 UX、测试与验收标准，以及第 15 节的 6 个
+待确认决定。**未确认前不要写实现。**
 
 ### 9.4 小项（穿插做）
 
@@ -564,8 +592,9 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 做过验收；v0.6.0 wheel 已在干净 venv 验证 console script。
 
 下一步按 HANDOFF 第 9 节：
-1. **先写 M4 行为探测的设计文档，不要写实现代码。** 用户明确要求：在独立完成“探针协议 +
-   证据边界”设计并经他确认之前，不要在沙箱里执行仓库代码。设计至少覆盖：
+1. **M4 行为探测：先读 `docs/m4-behavior-probe.md`，确认用户是否已确认第 15 节的 6 个
+   决定。未确认前不要写实现，也不要在沙箱里执行仓库代码；已确认则按文档第 14 节逐步
+   实现。** 设计文档已覆盖：
    - 安装 / 导入 / 运行测试分别做什么、以什么身份执行；
    - 容器内允许的网络与文件系统范围；
    - stdout/stderr 截断、总时长、文件数、报告大小等输出上限；
@@ -573,7 +602,6 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
    - “单次运行 ≠ 安全”“行为证据 ≠ 恶意判决”的措辞；
    - 镜像供应链（digest / @sha256 锁定）；
    - 超时、OOM、容器逃逸的检测与记录。
-   产出建议放 docs/m4-behavior-probe.md，并在 README / project.md 里链接。
 2. 设计经用户确认后，再问他要不要装 Semgrep / Docker 做剩余冒烟（装工具属于改动机器）。
 3. 穿插做 HANDOFF 9.4 的小项；每个可验证的小步单独 commit + push。
 

@@ -57,7 +57,8 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 
 未实现：
 
-- 在沙箱内执行仓库行为（安装、导入、运行测试）
+- 在沙箱内执行仓库行为（安装、导入、运行测试）；设计草案见
+  [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待确认，尚未实现）
 - OSV 离线数据库模式（当前 `--osv` 需要网络）
 - gitleaks 自定义规则集（当前固定使用二进制内置规则）
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
@@ -294,6 +295,11 @@ scan risk low/none:
 结论层只追加 caveat，不会因为探测通过而升级为 USE，也不会因为探测失败而把仓库
 判为恶意。报告明确写“一次运行、不代表后续版本、不是安全证明”。
 
+行为探测（M4 的下一阶段）不在本节范围内：它会在一次性容器里执行仓库代码，必须显式
+开启、用 `@sha256:` 锁定镜像，并按固定协议记录证据。设计草案见
+[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)；设计确认前不实现，也不在沙箱里
+执行仓库代码。
+
 ### 7.8 外部扫描器：Semgrep（M5 第一步）
 
 `--semgrep-config PATH` 开启。`PATH` 必须是本地文件或目录，否则 CLI 直接报错。
@@ -421,7 +427,8 @@ osv-scanner scan source --recursive <root> --format json --output-file <tmp>/osv
 5. **沙箱加固**：默认关闭；仅在显式模式下调用 Docker。argv 列表、`shell=False`，
    固定 `--network none` / 只读挂载 / cap-drop / 非 root / 资源与超时上限，不挂
    Docker socket，不用 `--privileged`，不自动 pull。挂载源拒绝文件系统根、home
-   及其祖先、含逗号 / 换行的路径。
+   及其祖先、含逗号 / 换行的路径。行为探测尚未实现；其设计把执行限制为显式开关 +
+   digest 镜像 + 每阶段一容器（见 [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)）。
 6. **外部扫描器**：Semgrep 只接受本地规则路径，禁止 `--config auto`，关闭
    metrics / 版本检查；argv 列表、`shell=False`、显式超时；输出按不可信 JSON 解析，
    越界路径丢弃。
@@ -531,6 +538,8 @@ reuseguard check psf/requests --no-recall --osv
     - `--sandbox off|auto|all`、`--sandbox-image`、`--sandbox-timeout`；默认 off
     - 报告“Sandbox”区块与 summary 列；结论只加 caveat，不升级也不判恶意
   - 待办：真实 Docker 手动冒烟验收；在沙箱内执行仓库行为（安装 / 导入 / 测试）
+    - 已完成设计草案：[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待用户确认，
+      确认前不写实现、不执行仓库代码）
   - 边界：单次运行只代表当次容器配置，不是“无害证明”
 - **M5（已完成）**：外部扫描器
   - Semgrep 适配器
@@ -568,6 +577,7 @@ reuseguard check psf/requests --no-recall --osv
 | 沙箱触发 | `off` / `auto` / `all` 三态 | 默认零副作用；high/critical 与显式请求都能覆盖 |
 | 沙箱失败 | 只写 warning，不改变结论 | 隔离失败是环境证据，不是仓库恶意证据 |
 | 沙箱镜像 | 不自动 pull，`--pull=never` | 避免隐式联网和镜像供应链副作用 |
+| 行为探测（设计） | 默认关闭、显式 `--behavior`、必须 `@sha256:`、每阶段一容器、结论最多 INSPECT | 设计草案待确认；执行不可信代码不能自动化，也不能用一次运行证明安全 |
 | Semgrep 规则 | 只接受本地路径 | 避免 `--config auto` 隐式联网和规则供应链风险 |
 | Semgrep 缺可选依赖 | 降级内置 + warning | 外部工具不可用不应中断整次评估 |
 | Semgrep 运行失败 | scan error，不静默降级 | 用户显式要求 Semgrep 时，静默换扫描器会掩盖覆盖缺口 |
@@ -591,8 +601,10 @@ reuseguard check psf/requests --no-recall --osv
    已定方向（M4 骨架 + CLI）：只支持本机 Docker daemon；`--network none`、只读
    bind mount、`--cap-drop ALL`、`--security-opt no-new-privileges`、非 root、
    资源上限、超时杀容器；不挂 docker socket。gVisor / runsc 仍待评估。
-6. **沙箱行为探测**：是否/如何执行安装脚本、导入模块或运行测试，同时保证
-   “单次运行”不被误读为安全证明？需要固定的探针协议和输出上限。
+6. **沙箱行为探测**：设计草案见
+   [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)。是否/如何执行安装脚本、
+   导入模块或运行测试，同时保证“单次运行”不被误读为安全证明？需要固定的探针协议
+   和输出上限。
 7. **外部扫描器覆盖**：Semgrep 的 `.semgrepignore` 仍可能让仓库缩小扫描范围；
    是否需要在隔离副本中删除该文件，或直接传入显式文件列表？
 8. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？

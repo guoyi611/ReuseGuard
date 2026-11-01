@@ -30,7 +30,7 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 2. 我准备复用某个项目，想知道有没有安装钩子、混淆、危险执行或明显 CI 风险。
 3. 我想把“复用前检查”接进 CI，出现 `AVOID` 时让流水线失败。
 
-## 4. 当前状态（v0.7.0）
+## 4. 当前状态（v0.7.1）
 
 已实现：
 
@@ -51,8 +51,8 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
 - 测试：fake adapter / fake runner，全离线
-- 打包：v0.7.0 wheel 构建成功（用 `.venv` 的 Python），安装到 `.venv` 后 console script
-  验证通过（`reuseguard --version` → 0.7.0 / `demo` / `--discover-only`）；
+- 打包：v0.7.1 wheel 构建成功（用 `.venv` 的 Python），安装到 `.venv` 后 console script
+  验证通过（`reuseguard --version` → 0.7.1 / `demo` / `--discover-only`）；
   pytest 用 `pythonpath=src` 测试工作区源码
 - 已验证（Windows）：gitleaks 8.30.1 与 osv-scanner 2.7.0 的真实二进制；装在项目内
   `.tools/scanners/`，不写入系统 PATH，删目录即卸载
@@ -146,7 +146,10 @@ topic → 出现在仓库名里的 topic → 带连字符的 topic → 较短的
 - 热度：`20 × min(1, log10(stars+1)/5)`
 
 召回结果只用于排序，不进入安全结论。GitHub Search 失败或限流会变成 `warnings`，
-不会中断种子仓库的评估。
+不会中断种子仓库的评估。搜索偶尔会返回 `owner/.github` 这类无法通过 `RepoRef.parse`
+的仓库名；`recall_idea` / `recall_similar` 会在进入 Scorecard 之前跳过它们，并写
+`Skipped N search result(s) with an invalid repository name.`。跳过意味着候选覆盖不完整，
+不是“没有问题”。
 
 #### `--idea` 模式
 
@@ -579,6 +582,7 @@ reuseguard check psf/requests --no-recall --osv
   - 短词 allowlist：`AI` / `2D` / `3D` / `C#` / `C++` 等不再被关键词正则丢掉
   - `--discover-only`：扫描关闭时 Markdown 隐藏结论，JSON 用 `withheld` 标记；
     不改变 `decide()`
+  - 召回边界过滤非法仓库名（`owner/.github`），写 warning，不再中断整次运行
 
 ## 11. 决策记录
 
@@ -599,6 +603,7 @@ reuseguard check psf/requests --no-recall --osv
 | 沙箱镜像 | 不自动 pull，`--pull=never` | 避免隐式联网和镜像供应链副作用 |
 | 行为探测（设计） | 默认关闭、显式 `--behavior`、必须 `@sha256:`、每阶段一容器、结论最多 INSPECT | 设计草案待确认；执行不可信代码不能自动化，也不能用一次运行证明安全 |
 | 短词提取 | 显式 allowlist（AI / 2D / C# / C++ 等） | 不放开任意短词或标点，避免把 `ok`、`my` 带进查询 |
+| 非法仓库名 | 召回边界过滤 + warning | 一个 `owner/.github` 不应让整次运行崩溃；跳过必须记录，不能静默 |
 | `--discover-only` | 只改 Markdown 展示，JSON 保留 decision + `withheld` | 判定规则不因展示需求改变；隐藏结论不等于“安全”，也不能让机器读者误以为扫描过 |
 | Semgrep 规则 | 只接受本地路径 | 避免 `--config auto` 隐式联网和规则供应链风险 |
 | Semgrep 缺可选依赖 | 降级内置 + warning | 外部工具不可用不应中断整次评估 |
@@ -644,9 +649,6 @@ reuseguard check psf/requests --no-recall --osv
 15. **短词召回噪音**：`ai` / `2d` 进入查询后，GitHub 会匹配 README，可能召回
     `china-dictatorship` 这类同时包含这些词的大仓库。是否给 `--idea` 查询加
     `in:name,description,topics`，或提供 `--strict-idea`？
-16. **非法仓库名**：GitHub 搜索可能返回 `owner/.github`；`RepoRef.parse` 会拒绝它，而
-    scorecard 阶段直接调用 `repo.ref`，导致整次运行抛 `ValueError` 退出 1。是否在召回边界
-    过滤无法解析的 `full_name` 并记 warning？
 
 ## 13. 如何扩展
 

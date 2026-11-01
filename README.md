@@ -31,7 +31,7 @@ ReuseGuard 不发明新的扫描器。它把 **召回相似项目 → OpenSSF Sc
 
 ## 状态
 
-v0.7.0 已经可用：
+v0.7.1 已经可用：
 
 - 输入 `owner/repo`、GitHub URL、SSH clone URL，或用 `--idea` 描述需求
 - 用 GitHub Search 召回相似项目，并按可解释的四维分数排序
@@ -198,6 +198,8 @@ reuseguard check psf/requests --sandbox auto `
 | 热度 | 20 | 星标数的对数缩放 |
 
 分数只用于排序，不参与安全结论。召回结果受 GitHub Search 限制；**没召回不等于不存在**。
+
+GitHub 搜索偶尔会返回 `owner/.github` 这类 ReuseGuard 无法解析的仓库名；这类结果会被跳过并写入 warning，不会让整次运行失败。跳过是覆盖不完整的一部分，不是“没有问题”。
 
 `--idea` 模式没有 topic，因此把 40 分换成关键词覆盖率：候选的仓库名、描述和 topics 中出现了多少比例的需求关键词。语言匹配 20、活跃度 20、热度 20 保持不变。
 

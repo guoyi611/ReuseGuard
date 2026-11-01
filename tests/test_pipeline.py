@@ -260,6 +260,26 @@ def test_idea_mode_assesses_candidates_without_a_seed() -> None:
     assert any("language:Python" in query for query in report.recall_queries)
 
 
+def test_idea_mode_skips_invalid_names_before_scorecard() -> None:
+    dummy_seed = make_repo("acme/dummy")
+    valid = make_repo("acme/pixel", description="AI 2D pixel art generator")
+    invalid = make_repo("gege-circle/.github")
+    github = FakeGitHub(dummy_seed, [invalid, valid])
+    scorecard = FakeScorecard({valid.full_name: scorecard_payload(8.0)})
+
+    report = Pipeline(
+        Settings(max_candidates=3, enable_scan=False),
+        github,
+        scorecard,
+    ).run_idea("AI 2D pixel art generator")
+
+    assert [assessment.candidate.repo.full_name for assessment in report.assessments] == [
+        "acme/pixel"
+    ]
+    assert scorecard.calls == ["acme/pixel"]
+    assert any("invalid repository name" in warning for warning in report.warnings)
+
+
 def test_idea_mode_with_no_results_returns_empty_report() -> None:
     dummy_seed = make_repo("acme/dummy")
     github = FakeGitHub(dummy_seed, [])

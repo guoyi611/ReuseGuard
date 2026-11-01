@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..adapters.github import GitHubClient, GitHubError, GitHubRateLimit
-from ..models import Candidate, RepoMeta, Similarity
+from ..models import Candidate, RepoMeta, RepoRef, Similarity
 
 _MAX_QUERY_LENGTH = 256
 
@@ -284,6 +284,26 @@ def build_idea_queries(
     return _finalize_queries(queries, max_queries=max_queries)
 
 
+def _has_parseable_name(repository: RepoMeta) -> bool:
+    """Reject search hits whose ``owner/name`` cannot be validated.
+
+    GitHub can return special repositories such as ``owner/.github``. They are
+    not usable as normal candidates, and letting one through makes Scorecard or
+    snapshot code fail on ``repository.ref`` and abort the whole run.
+    """
+    try:
+        RepoRef.parse(repository.full_name)
+    except ValueError:
+        return False
+    return True
+
+
+def _invalid_name_warning(invalid: set[str]) -> str:
+    count = len(invalid)
+    noun = "result" if count == 1 else "results"
+    return f"Skipped {count} search {noun} with an invalid repository name."
+
+
 def recall_idea(
     idea: str,
     client: GitHubClient,
@@ -303,6 +323,7 @@ def recall_idea(
 
     found: dict[str, RepoMeta] = {}
     warnings: list[str] = []
+    invalid: set[str] = set()
     per_page = min(50, max(10, limit * 3))
 
     for query in queries:
@@ -315,7 +336,13 @@ def recall_idea(
             warnings.append(f"Search failed for `{query}`: {exc}")
             continue
         for repository in results:
+            if not _has_parseable_name(repository):
+                invalid.add(repository.full_name)
+                continue
             found.setdefault(repository.full_name, repository)
+
+    if invalid:
+        warnings.append(_invalid_name_warning(invalid))
 
     moment = now or datetime.now(timezone.utc)
     keywords = [
@@ -404,6 +431,7 @@ def recall_similar(
     queries = build_queries(seed, min_stars=min_stars)
     found: dict[str, RepoMeta] = {}
     warnings: list[str] = []
+    invalid: set[str] = set()
     per_page = min(50, max(10, limit * 3))
 
     for query in queries:
@@ -416,9 +444,15 @@ def recall_similar(
             warnings.append(f"Search failed for `{query}`: {exc}")
             continue
         for repository in results:
+            if not _has_parseable_name(repository):
+                invalid.add(repository.full_name)
+                continue
             if repository.full_name.lower() == seed.full_name.lower():
                 continue
             found.setdefault(repository.full_name, repository)
+
+    if invalid:
+        warnings.append(_invalid_name_warning(invalid))
 
     moment = now or datetime.now(timezone.utc)
     candidates = [

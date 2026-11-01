@@ -100,6 +100,43 @@ def test_recall_deduplicates_excludes_seed_and_respects_limit() -> None:
     assert result.queries
 
 
+def test_recall_idea_skips_unparseable_repository_names() -> None:
+    valid = make_repo(full_name="acme/pixel", description="AI 2D pixel art generator")
+    invalid = make_repo(full_name="gege-circle/.github")
+    github = FakeGitHub(valid, results=[invalid, valid])
+
+    result = recall_idea("AI 2D pixel art generator", github, limit=5, now=NOW)
+
+    assert [candidate.repo.full_name for candidate in result.candidates] == ["acme/pixel"]
+    warnings = [item for item in result.warnings if "invalid repository name" in item]
+    assert warnings == ["Skipped 1 search result with an invalid repository name."]
+
+
+def test_recall_similar_skips_unparseable_repository_names() -> None:
+    seed = make_repo()
+    valid = make_repo(full_name="acme/pixel")
+    invalid = make_repo(full_name="gege-circle/.github")
+    github = FakeGitHub(seed, results=[invalid, valid])
+
+    result = recall_similar(seed, github, limit=5, now=NOW)
+
+    assert [candidate.repo.full_name for candidate in result.candidates] == ["acme/pixel"]
+    warnings = [item for item in result.warnings if "invalid repository name" in item]
+    assert warnings == ["Skipped 1 search result with an invalid repository name."]
+
+
+def test_recall_warns_once_for_duplicate_invalid_results_across_queries() -> None:
+    valid = make_repo(full_name="acme/pixel")
+    invalid = make_repo(full_name="gege-circle/.github")
+    github = FakeGitHub(valid, results=[invalid, invalid, valid])
+
+    result = recall_idea("pixel art", github, limit=5, now=NOW)
+
+    assert len(github.queries) >= 1
+    warnings = [item for item in result.warnings if "invalid repository name" in item]
+    assert warnings == ["Skipped 1 search result with an invalid repository name."]
+
+
 def test_recall_stops_when_rate_limited() -> None:
     seed = make_repo()
     github = FakeGitHub(seed, search_error=GitHubRateLimit("slow down"))

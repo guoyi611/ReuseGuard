@@ -3,8 +3,8 @@
 > 最后更新：2026-11-01
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
-> 当前版本：`0.7.0`
-> 基线提交：`bc440f1`（本交接文档更新在发现体验 P0 第一个 commit 之后；以 `git log` 为准）
+> 当前版本：`0.7.1`
+> 基线提交：`2d1dcb7`（本交接文档更新在 0.7.0 打包验证之后；以 `git log` 为准）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -37,8 +37,8 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M5 | **完成** | 三个适配器：Semgrep（替换内置）、gitleaks（追加凭据）、osv-scanner（追加依赖漏洞）；统一 Finding、合并、降级/错误边界 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**371 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-v0.7.0 wheel 已构建并安装到 `.venv`，console script 验证通过。
+当前测试：**375 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+v0.7.1 wheel 已构建并安装到 `.venv`，console script 验证通过。
 
 ## 3. 代码地图
 
@@ -446,31 +446,58 @@ queries = ['ai pixel art generator ...', 'ai pixel ...']
 
 1. **非法仓库名会崩**：`AI 2D pixel art generator` 真实搜索返回了 `gege-circle/.github`；
    `evaluate_reputation()` 调 `repo.ref` 时 `RepoRef.parse` 抛 `ValueError`，整次运行
-   traceback 退出 1。和 allowlist 无关（预埋问题），但短词查询更容易撞到。重跑该查询时
-   临时用了 `--no-scorecard` 绕过；正式修复应在召回边界过滤无法解析的 `full_name`，
-   并写 warning。
+   traceback 退出 1。和 allowlist 无关（预埋问题），但短词查询更容易撞到。**已在 4.12
+   修复**：召回边界过滤 + warning；重跑不再需要 `--no-scorecard`。
 2. **短词 README 噪音**：`ai 2d pixel art` 会召回 README 里同时出现这些词的大仓库
    （实测 `china-dictatorship` 排第一）。需要 `in:name,description,topics` 或
    `--strict-idea` 之类的查询约束，不属于本轮 allowlist。
 
-## 4.11 本会话（2026-11-01）：0.7.0 打包与 console script 验证
+## 4.11 本会话（2026-11-01）：0.7.1 打包与 console script 验证
 
 - `python -m build --wheel --no-isolation` 用**系统 Python 会失败**（没有安装 hatchling，
   `BackendUnavailable: Cannot import 'hatchling.build'`）；本轮改用
   `.\.venv\Scripts\python.exe -m build --wheel --no-isolation`，成功产出
-  `dist/reuseguard-0.7.0-py3-none-any.whl`。
+  `dist/reuseguard-0.7.1-py3-none-any.whl`。
 - 安装命令：
 
   ```powershell
   .\.venv\Scripts\python.exe -m pip install --no-index --no-deps --force-reinstall `
-    dist\reuseguard-0.7.0-py3-none-any.whl
+    dist\reuseguard-0.7.1-py3-none-any.whl
   ```
 
-  安装成功，替换掉原来的 0.6.0。
-- 验证：`.venv\Scripts\reuseguard.exe --version` → `reuseguard 0.7.0`；`demo` 正常；
+  安装成功，替换掉原来的 0.7.0。
+- 验证：`.venv\Scripts\reuseguard.exe --version` → `reuseguard 0.7.1`；`demo` 正常；
   `check --help` 能看到 `--discover-only`；`check acme/seed --discover-only`（没有
   `--no-scan`）按预期退出 2 并提示。
 - `dist/`、`.venv/` 都是 gitignored，不提交。
+
+## 4.12 本会话（2026-11-01）：修复非法仓库名导致的整次运行崩溃
+
+**现象**：canonical 查询 `AI 2D pixel art generator` 返回了 `gege-circle/.github`。
+`evaluate_reputation()` 调 `repo.ref`，`RepoRef.parse` 拒绝 `.github`，抛 `ValueError`，
+整次运行 traceback 退出 1。这不是 allowlist 引入的，但短词查询更容易撞到。
+
+**修复**（`stages/recall.py`）：
+
+- 新增 `_has_parseable_name()`：用 `RepoRef.parse(repository.full_name)` 校验搜索命中；
+- `recall_idea()` 和 `recall_similar()` 在进入 Scorecard / pipeline 之前跳过非法名字；
+- 用 `set` 去重，跨多条查询只记一次 warning：
+  `Skipped N search result(s) with an invalid repository name.`；
+- **不静默**：warning 进入报告 Run details；跳过意味着候选覆盖不完整，不是“没有问题”。
+
+**验证**：
+
+- 真实重跑同一 canonical 查询（带 Scorecard，不再需要 `--no-scorecard` 绕过）成功退出 0，
+  报告里不再出现 `gege-circle/.github`，并出现
+  `Skipped 1 search result with an invalid repository name.`；
+  结果仍是 README 噪音（P1，见下），但不会崩。
+- 新增测试 4 个：`tests/test_recall.py` 3 个（idea / similar / 跨查询去重）+
+  `tests/test_pipeline.py` 1 个（非法名字不会进入 Scorecard）。总数 371 → 375。
+- 版本 0.7.1；`.venv` 里的 0.7.1 console script 也实跑了同一查询，退出 0、
+  报告版本 v0.7.1、warning 正常。
+
+**仍待做（P1，不阻塞）**：`ai 2d pixel art` 会命中 README 的大仓库
+（`china-dictatorship` 排第一）；需要 `in:name,description,topics` / `--strict-idea`。
 
 ## 5. 如何运行
 
@@ -570,7 +597,7 @@ python -m build
    ```
    更老的 gitleaks（没有 `dir` 命令）会以退出码 126 失败，适配器记为 scan error，不静默降级。
 
-9. **包与测试路径**：`.venv` 里现在装的是 0.7.0 的 **wheel**（不是 editable；本轮已用
+9. **包与测试路径**：`.venv` 里现在装的是 0.7.1 的 **wheel**（不是 editable；本轮已用
    `.venv\Scripts\python.exe -m build --wheel --no-isolation` 构建并
    `--no-index --no-deps --force-reinstall` 安装），所以直接
    `python -c "import reuseguard"` 用的是安装副本；`python -m pytest` 通过 `pyproject.toml`
@@ -700,8 +727,7 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - 开发依赖噪音：`--osv` 会把 devDependencies 一起报出来（lodash 119 条），是否加过滤开关。
 - 依赖漏洞等级口径：advisory 标签 vs CVSS，是否本地实现 CVSS v3 或同时显示。
 - 私有仓库 tarball 支持 token。
-- **非法仓库名**（4.10 实测）：召回结果可能是 `owner/.github`；scorecard 调 `repo.ref`
-  会抛 `ValueError`，整次运行退出 1。应在召回边界过滤无法解析的 `full_name` 并写 warning。
+- ~~非法仓库名导致整次运行崩溃~~ **已在 4.12 修复**：召回边界过滤 + warning。
 - **短词 README 噪音**（4.10 实测）：`ai 2d pixel art` 会命中 README 里同时包含这些词的
   大仓库；考虑给 `--idea` 查询加 `in:name,description,topics`，或提供 `--strict-idea`。
 
@@ -731,9 +757,9 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 验收结果：同一 2D 像素用例已重跑，见 4.10 和 `reports/test-pixel-ai-after.md` /
 `reports/test-pixel-ai-after.json`（本机，gitignored）；canonical `AI 2D ...` 的
 `reports/test-2d-pixel-after.md` 也生成了（用 `--no-scorecard` 绕开 4.10 的 `.github` 崩溃）。
-pytest 371 passed，ruff 全绿。
+P0 结束时 pytest 371 passed；4.12 再 +4，当前 375 passed，ruff 全绿。
 
-后续 P1（下一轮）：先修 4.10 的非法仓库名崩溃；再做报告显示每条查询的候选来源、
+后续 P1（下一轮）：非法仓库名崩溃已在 4.12 修复；接着做报告显示每条查询的候选来源、
 `--strict-idea`（或查询字段约束）、`license unknown` 警告。M4 行为探测仍等用户确认。
 
 ## 10. 旧提示词（M4 设计，历史）
@@ -807,29 +833,25 @@ pytest 371 passed，ruff 全绿。
 ```text
 继续开发 ReuseGuard（https://github.com/guoyi611/ReuseGuard）。
 
-先读 HANDOFF.md 的 4.8 / 4.9 / 4.10、README.md、project.md、docs/m4-behavior-probe.md；
+先读 HANDOFF.md 的 4.8–4.12、README.md、project.md、docs/m4-behavior-probe.md；
 再读本机 reports/test-pixel-ai-after.md、reports/test-pixel-ai-after.json、
-reports/test-2d-pixel-after.md（reports/ 已 gitignore）。
+reports/test-2d-pixel-after-fix.md（reports/ 已 gitignore）。
 
 执行基线：
 - git status
 - git log --oneline -5
 - python -m pytest
 - .\.tools\bin\ruff.exe check src tests
-确认 main / v0.7.0 / 371 passed / ruff 全绿后再动手（最新提交以 git log 为准）。
+确认 main / v0.7.1 / 375 passed / ruff 全绿后再动手（最新提交以 git log 为准）。
 
-背景：发现体验 P0 已完成（短词 allowlist + --discover-only）。重跑 2D 像素用例后，
-短词确实进入查询，但也暴露了两个新问题（HANDOFF 4.10 / 9.4）：
+背景：发现体验 P0（短词 allowlist + --discover-only）和非法仓库名崩溃都已修完。
+现在只剩 P1 查询策略（HANDOFF 4.10 / 4.12）：
 
-A) P0 崩溃（优先）：GitHub 搜索会返回 owner/.github 之类的名字，
-   evaluate_reputation() 里 repo.ref -> RepoRef.parse 抛 ValueError，整次运行退出 1。
-   建议在召回边界（recall_idea / recall_similar）过滤无法解析的 full_name，写 warning，
-   补测试（不能静默丢掉全部结果，也不能让一个坏结果中断整次运行）。
-
-B) P1 查询策略：ai / 2d 这类短词会命中 README 里同时出现这些词的大仓库
-   （实测 ai 2d pixel art 召回 china-dictatorship）。考虑给 --idea 查询加
-   in:name,description,topics、记录每个候选来自哪条查询、提供 --strict-idea；
-   license unknown（Aseprite 陷阱）也要在报告里显式提示。
+- ai / 2d 这类短词会命中 README 里同时出现这些词的大仓库
+  （实测 ai 2d pixel art 召回 china-dictatorship）。考虑给 --idea 查询加
+  in:name,description,topics、记录每个候选来自哪条查询、提供 --strict-idea；
+- license unknown（Aseprite 陷阱）要在报告里显式提示；
+- 改查询策略前先想清楚：这是 P1，不是 allowlist 的回归；不要把“没有召回”写成“安全”。
 
 要求：
 - 每个小步补测试、跑 pytest + ruff、更新 README/project.md/HANDOFF、单独 commit + push。
@@ -840,7 +862,9 @@ B) P1 查询策略：ai / 2d 这类短词会命中 README 里同时出现这些�
 环境：
 - python -m pytest 直接可用（pythonpath=src）；ruff 用 .\.tools\bin\ruff.exe。
 - 外部扫描器在 .tools\scanners\（本轮不需要）。
-- pip 连不上 PyPI；离线安装 --no-index；构建 python -m build --wheel --no-isolation。
+- pip 连不上 PyPI；离线安装 --no-index。构建要用 `.venv` 的 Python
+  （`.\.venv\Scripts\python.exe -m build --wheel --no-isolation`）；系统 Python 没有
+  hatchling，会 `BackendUnavailable`。
 - 远程 SSH；push 需要 $env:GIT_SSH = (Get-Command ssh).Source。
 
 汇报：先说人话，再说改了什么、验证结果、下一步。

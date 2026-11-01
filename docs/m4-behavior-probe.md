@@ -459,6 +459,9 @@ Docker 可能因为平台差异、daemon 配置、旧版本而忽略/改写参�
   - Rust：`cargo fetch --offline`（`CARGO_HOME` 指向缓存的可写副本）
 - 缓存缺失 → `skipped_cache_missing`，不是错误。
 - 缓存本身是用户提供的信任输入；报告记录路径和文件数，不记录内容。
+- **只读缓存不等于只读使用**：npm / Go / Cargo 可能需要可写的索引或构建缓存。宿主把
+  只读缓存**复制**到 `/work/.cache`（计入 `/work` 的字节/文件上限），命令指向副本；
+  复制失败则 `skipped_cache_missing`。这样不会因为“缓存目录不可写”而假装安装成功/失败。
 - **不做**：自动下载依赖、自动 `pip install` 联网、自动 `npm install` 联网。
 
 Tier 3（更远）：允许安装时联网，但只能经过一个**用户提供的、digest 锁定的代理容器**，
@@ -515,7 +518,7 @@ Tier 3（更远）：允许安装时联网，但只能经过一个**用户提供
 | `/tmp` | tmpfs | rw, noexec, nosuid, nodev, 64m | 临时文件 | 不能执行，不能 setuid |
 | `/run` | tmpfs | rw, noexec, nosuid, nodev, 16m | 运行时目录 | 某些工具需要 |
 | `/dev/shm` | tmpfs | rw, noexec, nosuid, nodev, 64m | 共享内存 | 防止用宿主 `/dev/shm` |
-| `/proc` | 默认 | 只读/掩码 | — | 保留 Docker 默认 masked/read-only paths |
+| `/proc` | Docker 默认 | 默认 masked / read-only paths | — | 不额外挂载；保留 Docker 默认掩码 |
 | `/sys` | 默认 | 只读 | — | 不额外挂载 |
 | Docker socket | 不挂载 | — | — | 容器内不存在 |
 | 宿主 home / `/` | 不挂载 | — | — | 明确拒绝 |
@@ -589,7 +592,7 @@ Tier 3（更远）：允许安装时联网，但只能经过一个**用户提供
 | 单阶段 stdout | 64 KiB | 保留前 32 KiB + 后 32 KiB，中间插入 `... [truncated N bytes] ...` |
 | 单阶段 stderr | 64 KiB | 同上 |
 | 整个 probe 捕获的原始输出 | 512 KiB | 超出后继续 drain（防止管道阻塞），但不再保存；标记 `truncated` |
-| 宿主从 Docker 读取的原始流 | 1 MiB | 超出后丢弃中段；仍保留尾部；标记 `output_flood` |
+| 宿主从 Docker 读取的原始流（每阶段） | 1 MiB | 超出后丢弃中段；仍保留尾部；标记 `output_flood` |
 | 阶段输出里的单行长度 | 4 KiB | 截断并标记 |
 | 报告 JSON 总大小 | 2 MiB | 按优先级裁剪：输出尾部 → 进程样本 → 文件列表；保留阶段/退出码/完整性 |
 | Markdown 的 behavior 区块 | 120 行 / 每类 20 条事件 | 只展示结构化摘要，不展示原始输出 |
@@ -650,7 +653,7 @@ Tier 3（更远）：允许安装时联网，但只能经过一个**用户提供
 ```json
 {
   "schema": "reuseguard.behavior/1",
-  "status": "completed",
+  "status": "partial",
   "run_id": "01J9Z8YQ3K7V5M2C4R6T8W0XAB",
   "tool_version": "0.7.0",
   "protocol_version": 1,
@@ -800,6 +803,17 @@ Tier 3（更远）：允许安装时联网，但只能经过一个**用户提供
 
 ### 9.3 字段语义
 
+整体 `status` 的含义：
+
+- `completed`：所有请求的阶段都跑完，且证据采集没有被截断到无法解释。
+- `partial`：有阶段未完成、或平台限制导致某类证据不可用（例如 Windows 上的进程列表），
+  但已有部分证据。
+- `timeout`：总预算或阶段超时导致至少一个阶段被 kill。
+- `error`：Docker/宿主侧错误，未得到可解释的阶段结果。
+- `refused`：镜像 digest 校验或 preflight 不通过，**没有执行仓库代码**。
+- `unavailable`：Docker 不可用，**没有执行**。
+- `integrity_failure`：canary/预检/清理完整性校验失败，本次结果不可依赖。
+
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `schema` | string | 固定 `reuseguard.behavior/1`；破坏性变更升 `2` |
@@ -818,7 +832,7 @@ Tier 3（更远）：允许安装时联网，但只能经过一个**用户提供
 | `phases[].oom_killed` | bool | `docker inspect .State.OOMKilled` |
 | `phases[].stdout/stderr` | object | 有上限的尾部；`trust=untrusted_repo_output` |
 | `processes` | object | 采样进程；`trust=host_sampled`；可能漏 |
-| `files` | object | 宿主侧最终状态差异；不跟随符号链接 |
+| `files` | object | 宿主侧最终状态差异；路径相对 `<workdir>`；不跟随符号链接 |
 | `network` | object | 网络模式 + 能力；`none` 下不声称“没有尝试” |
 | `resources` | object | 峰值内存/PID/CPU；采样 |
 | `integrity` | object | 预检、canary、Docker 对象差异；`tamper_possible` 恒为 true |
@@ -935,9 +949,9 @@ IntegrityEvidence     preflight_ok, canary_ok, unexpected_docker_objects, tamper
 | Docker 不可用 / 镜像缺失 / digest 不符 | 无 | 不变 | “行为探测未运行；这不影响静态结论，但也没有行为证据。” |
 | `completed`，无异常观察 | **不升级、不降级** | 不变 | “一次运行、一个快照；没有观察到异常不等于安全。” |
 | `completed`，有可疑观察（未来 Tier 3） | 最多压到 INSPECT | ≤ medium | “观察到的行为需要人工判断；不是恶意判决。” |
-| `timeout` / `oom` / `resource_exhausted` | 最多压到 INSPECT | ≤ medium | “行为探测未完成，覆盖不完整。” |
+| `timeout` / `oom` / `resource_exhausted` | 若原本是 USE，压到 INSPECT；**不改变 AVOID** | ≤ medium | “行为探测未完成，覆盖不完整。” |
 | `failed` / `inconclusive` | 无 | 不变 | “阶段失败可能是环境/依赖问题，不是安全发现。” |
-| `integrity_failure` | 最多压到 INSPECT | ≤ low | “隔离完整性校验失败，本次结果不可依赖。” |
+| `integrity_failure` | 若原本是 USE，压到 INSPECT；**不改变 AVOID** | ≤ low | “隔离完整性校验失败，本次结果不可依赖。” |
 | 静态结论已是 AVOID | **不改变** | 不变 | 行为探测不能把 AVOID 洗成 USE/INSPECT |
 
 **硬规则**：
@@ -994,7 +1008,7 @@ the registry and the local Docker daemon.
 ### 12.1 CLI（设计）
 
 ```text
---behavior [import|test|all]      默认 off；显式开启；all = import + test
+--behavior [import|test|all]      默认 off；显式开启；裸 --behavior 等价于 all
 --behavior-image IMAGE@sha256:... 必填（当 --behavior 不是 off）
 --behavior-timeout SECONDS        总预算，默认 300（30–1800）
 --behavior-phase-timeout SECONDS  单阶段，默认 120（10–900）

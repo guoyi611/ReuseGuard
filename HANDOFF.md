@@ -38,7 +38,7 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
 当前测试：**371 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
-v0.6.0 wheel 构建和干净 venv 验证已完成（0.7.0 未重新打包）。
+v0.7.0 wheel 已构建并安装到 `.venv`，console script 验证通过。
 
 ## 3. 代码地图
 
@@ -453,6 +453,25 @@ queries = ['ai pixel art generator ...', 'ai pixel ...']
    （实测 `china-dictatorship` 排第一）。需要 `in:name,description,topics` 或
    `--strict-idea` 之类的查询约束，不属于本轮 allowlist。
 
+## 4.11 本会话（2026-11-01）：0.7.0 打包与 console script 验证
+
+- `python -m build --wheel --no-isolation` 用**系统 Python 会失败**（没有安装 hatchling，
+  `BackendUnavailable: Cannot import 'hatchling.build'`）；本轮改用
+  `.\.venv\Scripts\python.exe -m build --wheel --no-isolation`，成功产出
+  `dist/reuseguard-0.7.0-py3-none-any.whl`。
+- 安装命令：
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip install --no-index --no-deps --force-reinstall `
+    dist\reuseguard-0.7.0-py3-none-any.whl
+  ```
+
+  安装成功，替换掉原来的 0.6.0。
+- 验证：`.venv\Scripts\reuseguard.exe --version` → `reuseguard 0.7.0`；`demo` 正常；
+  `check --help` 能看到 `--discover-only`；`check acme/seed --discover-only`（没有
+  `--no-scan`）按预期退出 2 并提示。
+- `dist/`、`.venv/` 都是 gitignored，不提交。
+
 ## 5. 如何运行
 
 ```powershell
@@ -551,8 +570,9 @@ python -m build
    ```
    更老的 gitleaks（没有 `dir` 命令）会以退出码 126 失败，适配器记为 scan error，不静默降级。
 
-9. **包与测试路径**：`.venv` 里现在装的是 0.6.0 的 **wheel**（不是 editable；0.7.0 未重新
-   打包安装），所以直接
+9. **包与测试路径**：`.venv` 里现在装的是 0.7.0 的 **wheel**（不是 editable；本轮已用
+   `.venv\Scripts\python.exe -m build --wheel --no-isolation` 构建并
+   `--no-index --no-deps --force-reinstall` 安装），所以直接
    `python -c "import reuseguard"` 用的是安装副本；`python -m pytest` 通过 `pyproject.toml`
    的 `pythonpath = ["src"]` 跑工作区源码，无需 `PYTHONPATH`。改完源码后，控制台命令要重新
    build + install 才会更新；开发时以 pytest 为准。ruff 仍用 `.tools\bin\ruff.exe`。

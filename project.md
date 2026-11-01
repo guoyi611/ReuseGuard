@@ -51,8 +51,9 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
 - 测试：fake adapter / fake runner，全离线
-- 打包：v0.6.0 wheel 构建成功，在干净 venv 中验证过 console script
-  （`reuseguard --version` / `demo`）；pytest 用 `pythonpath=src` 测试工作区源码
+- 打包：v0.7.0 wheel 构建成功（用 `.venv` 的 Python），安装到 `.venv` 后 console script
+  验证通过（`reuseguard --version` → 0.7.0 / `demo` / `--discover-only`）；
+  pytest 用 `pythonpath=src` 测试工作区源码
 - 已验证（Windows）：gitleaks 8.30.1 与 osv-scanner 2.7.0 的真实二进制；装在项目内
   `.tools/scanners/`，不写入系统 PATH，删目录即卸载
 

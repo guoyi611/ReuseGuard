@@ -4,8 +4,7 @@
 > 仓库：https://github.com/guoyi611/ReuseGuard
 > 分支：`main`
 > 当前版本：`0.6.0`
-> 基线提交：`ce5664c docs: clarify behavior probe statuses and limits`
-> （v0.6.0；M4 设计文档已提交；本会话未改代码）
+> 基线提交：`ce5664c`（本交接文档更新在 `18c73e2` 之后；以 `git log` 为准）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -698,7 +697,7 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 - git log --oneline -5
 - python -m pytest
 - .\.tools\bin\ruff.exe check src tests
-确认 main / ce5664c / v0.6.0 / 359 passed / ruff 全绿后再动手。
+确认 main / 18c73e2 / v0.6.0 / 359 passed / ruff 全绿后再动手。
 
 本轮任务：只做“发现体验”P0 两项，不碰 M4 行为探测实现。
 

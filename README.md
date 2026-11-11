@@ -480,6 +480,9 @@ ruff format --check src tests
 
 测试全部使用 fake adapter，不访问网络。想在本地跑真实链路，直接用 `reuseguard check`，或设置 `GITHUB_TOKEN` 后运行。
 
+并行开发用 `main → develop → feat/*` + 独立 worktree，分支划分、合并顺序和工具路径见
+[docs/parallel-development.md](docs/parallel-development.md)。
+
 ## Roadmap
 
 - **M1（已完成）**：种子 URL → 召回 → Scorecard → 静态扫描 → Markdown

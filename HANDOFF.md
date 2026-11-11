@@ -1,10 +1,10 @@
 # ReuseGuard 交接文档
 
-> 最后更新：2026-11-01
+> 最后更新：2026-11-11
 > 仓库：https://github.com/guoyi611/ReuseGuard
-> 分支：`main`
+> 分支：`main`（并行开发见 `develop` / `feat/*`，见 `docs/parallel-development.md`）
 > 当前版本：`0.7.1`
-> 基线提交：`2d1dcb7`（本交接文档更新在 0.7.0 打包验证之后；以 `git log` 为准）
+> 基线提交：`2db0e9a`（并行开发分支与 worktree 建立；以 `git log` 为准）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -498,6 +498,24 @@ queries = ['ai pixel art generator ...', 'ai pixel ...']
 
 **仍待做（P1，不阻塞）**：`ai 2d pixel art` 会命中 README 的大仓库
 （`china-dictatorship` 排第一）；需要 `in:name,description,topics` / `--strict-idea`。
+
+## 4.13 本会话（2026-11-11）：并行开发分支与 worktree 隔离
+
+按“功能分区”建立 `main → develop → feat/*` 模型，避免多人/多任务在同一个工作区切分支：
+
+- `main`：可发布、已验证；只接受 `develop` 的合并。
+- `develop`：集成分支；CI 现在也会在 push develop 时运行。
+- 5 个功能分支（都从 `develop` 拉出，均已 push）：
+  - `feat/discovery-quality`：P0 查询相关性、候选来源、`--strict-idea`、license 警告
+  - `feat/scanner-hardening`：OSV 离线/`--no-resolve`/dev 依赖/CVSS、gitleaks 规则、Semgrep 验收
+  - `feat/policy-external-rules`：外部规则 ID 进入 YAML
+  - `feat/private-repo-token`：私有仓库 tarball token
+  - `feat/m4-behavior-probe`：M4 行为探测 + Docker 验收（最后合并）
+- worktree 在 `.worktrees/<name>`（已 gitignore），每个分支一个独立目录；主工作区仍在 `main`。
+- 详见 `docs/parallel-development.md`：合并顺序、冲突热点、每个 worktree 里怎么跑 pytest/ruff/CLI。
+- `.github/workflows/ci.yml` 的 push 分支加了 `develop`。
+
+当前 `.worktrees/` 下已有 5 个 worktree，全部指向 `2db0e9a`；`git worktree list` 可查看。
 
 ## 5. 如何运行
 

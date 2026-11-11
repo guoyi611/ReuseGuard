@@ -29,6 +29,9 @@ reports/
 *.report.json
 .reuseguard/
 
+# Parallel-development worktrees (local only)
+.worktrees/
+
 # Editors / OS
 .idea/
 .vscode/

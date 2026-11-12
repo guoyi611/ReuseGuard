@@ -479,3 +479,59 @@ def test_non_directory_root_returns_error_without_running(tmp_path: Path) -> Non
 def test_options_reject_unsafe_values(kwargs: dict) -> None:
     with pytest.raises(OsvError):
         OsvOptions(**kwargs)
+
+
+def test_default_argv_enables_no_resolve(tmp_path: Path) -> None:
+    """By default osv-scanner must not reach out to a package registry."""
+    root = _root(tmp_path)
+    runner = _Runner(_payload())
+
+    _scanner(runner).scan(root)
+
+    argv = runner.calls[0][0]
+    assert "--no-resolve" in argv
+    assert "--offline" not in argv
+    assert "--local-db" not in argv
+
+
+def test_resolve_opt_out_removes_no_resolve_flag(tmp_path: Path) -> None:
+    """Users can opt back into transitive resolution explicitly."""
+    root = _root(tmp_path)
+    runner = _Runner(_payload())
+    scanner = OsvScanner(
+        OsvOptions(process_timeout=30.0, no_resolve=False),
+        runner=runner,
+    )
+
+    scanner.scan(root)
+
+    argv = runner.calls[0][0]
+    assert "--no-resolve" not in argv
+
+
+def test_offline_db_injects_offline_and_local_db_flags(tmp_path: Path) -> None:
+    """Offline mode passes both --offline and --local-db <path>."""
+    root = _root(tmp_path)
+    db = tmp_path / "osv-db"
+    db.mkdir()
+    runner = _Runner(_payload())
+    scanner = OsvScanner(
+        OsvOptions(process_timeout=30.0, offline_db=db),
+        runner=runner,
+    )
+
+    scanner.scan(root)
+
+    argv = runner.calls[0][0]
+    assert "--offline" in argv
+    idx = argv.index("--local-db")
+    assert argv[idx + 1] == str(db)
+    # offline implies no-resolve; the adapter should still emit the flag so the
+    # command line is self-describing even if osv-scanner's defaults change.
+    assert "--no-resolve" in argv
+
+
+def test_options_reject_offline_with_resolve_enabled() -> None:
+    """Offline matching has no registry to resolve against; refuse the combo."""
+    with pytest.raises(OsvError, match="offline"):
+        OsvOptions(process_timeout=30.0, no_resolve=False, offline_db=Path("/tmp/db"))

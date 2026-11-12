@@ -66,16 +66,31 @@ class OsvUnavailable(OsvError):
 
 @dataclass(frozen=True)
 class OsvOptions:
-    """How to invoke osv-scanner for one repository snapshot."""
+    """How to invoke osv-scanner for one repository snapshot.
+
+    ``no_resolve`` defaults to True so osv-scanner only trusts what the lockfile
+    already records; without it, incomplete manifests trigger registry lookups
+    that widen the network boundary silently. ``offline_db`` opts into fully
+    offline matching against a pre-downloaded OSV database; when set, the
+    adapter passes both ``--offline`` and ``--local-db`` and refuses to also
+    enable transitive resolution (there is no registry to resolve against).
+    """
 
     binary: str = DEFAULT_OSV_BINARY
     process_timeout: float = DEFAULT_PROCESS_TIMEOUT
+    no_resolve: bool = True
+    offline_db: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.binary.strip():
             raise OsvError("osv-scanner binary must not be empty")
         if not 10.0 <= self.process_timeout <= 3600.0:
             raise OsvError("osv-scanner process timeout must be between 10 and 3600 seconds")
+        if self.offline_db is not None and not self.no_resolve:
+            raise OsvError(
+                "--osv-offline cannot be combined with transitive resolution; "
+                "there is no registry to resolve against in offline mode"
+            )
 
 
 @dataclass
@@ -198,7 +213,7 @@ class OsvScanner:
         )
 
     def _build_argv(self, root: Path, report_path: Path) -> list[str]:
-        return [
+        argv = [
             self.options.binary,
             "scan",
             "source",
@@ -209,6 +224,11 @@ class OsvScanner:
             "--output-file",
             str(report_path),
         ]
+        if self.options.no_resolve:
+            argv.append("--no-resolve")
+        if self.options.offline_db is not None:
+            argv.extend(["--offline", "--local-db", str(self.options.offline_db)])
+        return argv
 
 
 def _collect_advisories(

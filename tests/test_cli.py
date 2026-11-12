@@ -476,3 +476,115 @@ def test_osv_settings_are_forwarded_to_the_pipeline(
     settings = captured["settings"]
     assert settings.enable_osv is True
     assert settings.osv_timeout == 120.0
+    # Default: transitive resolution is disabled so osv-scanner trusts the lockfile.
+    assert settings.osv_no_resolve is True
+    assert settings.osv_offline_db is None
+
+
+def test_osv_resolve_flag_disables_no_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "osv.md"
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--osv",
+            "--osv-resolve",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert captured["settings"].osv_no_resolve is False
+
+
+def test_osv_offline_requires_existing_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "does-not-exist"
+    code = cli.main(["check", "acme/seed", "--osv", "--osv-offline", str(missing)])
+
+    assert code == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_osv_offline_rejects_file_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file_path = tmp_path / "not-a-dir"
+    file_path.write_text("x", encoding="utf-8")
+    code = cli.main(["check", "acme/seed", "--osv", "--osv-offline", str(file_path)])
+
+    assert code == 2
+    assert "must be a directory" in capsys.readouterr().err
+
+
+def test_osv_offline_and_resolve_are_mutually_exclusive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "db"
+    db.mkdir()
+    code = cli.main(
+        ["check", "acme/seed", "--osv", "--osv-resolve", "--osv-offline", str(db)]
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--osv-resolve" in err and "--osv-offline" in err
+
+
+def test_osv_offline_is_forwarded_to_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "db"
+    db.mkdir()
+    output = tmp_path / "osv.md"
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--osv",
+            "--osv-offline",
+            str(db),
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.osv_offline_db == str(db)
+    # offline implies no-resolve; the CLI should keep the default True.
+    assert settings.osv_no_resolve is True

@@ -195,6 +195,8 @@ class Settings:
     gitleaks_timeout: float = 300.0
     enable_osv: bool = False
     osv_timeout: float = 300.0
+    osv_no_resolve: bool = True
+    osv_offline_db: str | None = None
     sandbox_mode: str = "off"
     sandbox_image: str = DEFAULT_IMAGE
     sandbox_timeout: float = DEFAULT_TIMEOUT_SECONDS

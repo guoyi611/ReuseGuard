@@ -535,3 +535,91 @@ def test_options_reject_offline_with_resolve_enabled() -> None:
     """Offline matching has no registry to resolve against; refuse the combo."""
     with pytest.raises(OsvError, match="offline"):
         OsvOptions(process_timeout=30.0, no_resolve=False, offline_db=Path("/tmp/db"))
+
+
+def _package_entry(
+    name: str = "example",
+    version: str = "1.3.1",
+    ecosystem: str = "npm",
+    *,
+    dev: bool | None = None,
+    optional: bool | None = None,
+) -> dict:
+    pkg: dict = {"name": name, "version": version, "ecosystem": ecosystem}
+    if dev is not None:
+        pkg["dev"] = dev
+    if optional is not None:
+        pkg["optional"] = optional
+    return {
+        "package": pkg,
+        "vulnerabilities": [_vuln()],
+        "groups": [{"ids": [GHSA]}],
+    }
+
+
+def test_npm_dev_dependency_is_tagged_development(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package_entry(dev=True)])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert len(report.findings) == 1
+    finding = report.findings[0]
+    assert finding.scope == "development"
+    assert "Development-only dependency" in finding.message
+
+
+def test_npm_production_dependency_is_tagged_production(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package_entry(dev=False)])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope == "production"
+    assert "Production dependency" in report.findings[0].message
+
+
+def test_npm_optional_dependency_counts_as_development(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package_entry(optional=True)])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope == "development"
+
+
+def test_mixed_prod_and_dev_packages_mark_advisory_as_production(tmp_path: Path) -> None:
+    """If any affected package is prod, the advisory stays production-scoped."""
+    root = _root(tmp_path)
+    packages = [_package_entry(name="prod-pkg", dev=False), _package_entry(name="dev-pkg", dev=True)]
+    results = [_result(packages=packages)]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    # Both packages share one advisory (same GHSA + lockfile); aggregated scope wins.
+    assert len(report.findings) == 1
+    assert report.findings[0].scope == "production"
+
+
+def test_pip_dev_requirements_file_is_tagged_development(tmp_path: Path) -> None:
+    root = tmp_path / "pip-tree"
+    root.mkdir()
+    (root / "requirements-dev.txt").write_text("example==1.0\n", encoding="utf-8")
+    results = [
+        _result(
+            path="requirements-dev.txt",
+            packages=[_package_entry(ecosystem="PyPI")],
+        )
+    ]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope == "development"
+
+
+def test_unknown_ecosystem_scope_is_none(tmp_path: Path) -> None:
+    """Without a known signal we must not guess."""
+    root = tmp_path / "cargo-tree"
+    root.mkdir()
+    (root / "Cargo.lock").write_text("", encoding="utf-8")
+    results = [
+        _result(path="Cargo.lock", packages=[_package_entry(ecosystem="crates.io")])
+    ]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope is None

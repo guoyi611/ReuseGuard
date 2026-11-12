@@ -103,6 +103,7 @@ class _Advisory:
     severity: RiskLevel = RiskLevel.NONE
     ecosystem: str = ""
     packages: list[str] | None = None
+    scope: str | None = None
 
     def __post_init__(self) -> None:
         if self.packages is None:
@@ -264,6 +265,7 @@ def _collect_advisories(
                 continue
             label = f"{name}@{version}" if version else name
 
+            scope = _classify_scope(package, lockfile)
             entries = _package_advisories(entry)
             for ids, vulnerabilities in entries:
                 key = (lockfile, frozenset(ids))
@@ -281,11 +283,45 @@ def _collect_advisories(
                     severity = _severity(vulnerability)
                     if severity.rank > advisory.severity.rank:
                         advisory.severity = severity
+                # Scope aggregation: any production package makes the advisory
+                # production-scoped; unknown scopes leave the advisory untagged
+                # rather than guessed. Pure-development advisories are tagged
+                # so reports can surface them separately without hiding them.
+                if scope == "production":
+                    advisory.scope = "production"
+                elif scope == "development" and advisory.scope is None:
+                    advisory.scope = "development"
 
     for advisory in advisories.values():
         if advisory.severity is RiskLevel.NONE:
             advisory.severity = RiskLevel.MEDIUM
     return advisories
+
+
+def _classify_scope(package: dict, lockfile: str) -> str | None:
+    """Best-effort classifier for dependency scope.
+
+    Returns ``"development"`` or ``"production"`` only when the lockfile format
+    gives us an explicit signal (npm's ``dev``/``optional`` flags, pip's
+    ``-dev``/``-test`` requirements filename). Unknown ecosystems return
+    ``None`` so we do not guess and accidentally downgrade a real production
+    dependency.
+    """
+    if not isinstance(package, dict):
+        return None
+    name_lower = lockfile.lower()
+    # npm package-lock.json: packages[].dev or packages[].optional mark non-prod
+    if name_lower.endswith("package-lock.json"):
+        if package.get("dev") is True or package.get("optional") is True:
+            return "development"
+        return "production"
+    # pip requirements files: conventional naming distinguishes dev/test deps
+    if name_lower.endswith((".txt", ".in")):
+        base = name_lower.rsplit("/", 1)[-1]
+        if any(token in base for token in ("-dev", "-test", "-tests", "dev-", "test-")):
+            return "development"
+        return "production"
+    return None
 
 
 def _package_advisories(entry: dict) -> list[tuple[list[str], list[dict]]]:
@@ -365,6 +401,11 @@ def _to_finding(
     ]
 
     reason = suppression_reason(advisory.lockfile, suppress_globs)
+    scope = advisory.scope
+    if scope == "development":
+        message = f"Development-only dependency. {message}"[:_MAX_MESSAGE]
+    elif scope == "production":
+        message = f"Production dependency. {message}"[:_MAX_MESSAGE]
     return Finding(
         rule_id=rule_id,
         title=summary[:_MAX_DESCRIPTION],
@@ -376,6 +417,7 @@ def _to_finding(
         evidence=evidence,
         suppressed=reason is not None,
         suppression_reason=reason,
+        scope=scope,
     )
 
 

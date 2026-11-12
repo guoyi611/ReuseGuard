@@ -217,7 +217,13 @@ class ScanStatus(str, Enum):
 
 @dataclass
 class Finding:
-    """One static-analysis match, before or after false-positive control."""
+    """One static-analysis match, before or after false-positive control.
+
+    ``scope`` is an optional dependency classifier used by the OSV adapter to
+    distinguish production from development dependencies. Other scanners leave
+    it as ``None``. It does not influence severity or verdict; it exists so
+    reports can surface noisy dev-only findings separately without hiding them.
+    """
 
     rule_id: str
     title: str
@@ -229,6 +235,7 @@ class Finding:
     evidence: str | None = None
     suppressed: bool = False
     suppression_reason: str | None = None
+    scope: str | None = None
 
 
 @dataclass

@@ -234,10 +234,17 @@ def _render_assessment(
     lines.extend(["", f"### Static scan — {_scan_risk(assessment)}", ""])
     scan = assessment.scan
     if scan.status is ScanStatus.SCANNED:
+        dev_count = sum(1 for f in scan.effective_findings if f.scope == "development")
+        eff_total = len(scan.effective_findings)
+        if dev_count:
+            prod_count = eff_total - dev_count
+            eff_label = f"{prod_count} production + {dev_count} development"
+        else:
+            eff_label = f"{eff_total}"
         lines.append(
             f"`{scan.scanner}` scanned {scan.files_scanned:,} files "
             f"({_format_bytes(scan.bytes_scanned)}) with "
-            f"{len(scan.effective_findings)} effective finding(s) and "
+            f"{eff_label} effective finding(s) and "
             f"{len(scan.suppressed_findings)} suppressed."
         )
         if scan.truncated:
@@ -255,17 +262,43 @@ def _render_assessment(
             scan.effective_findings,
             key=lambda finding: (-finding.severity.rank, finding.path, finding.line or 0),
         )
-        if effective:
-            lines.extend(["", "| Severity | Rule | Location | Detail |", "|---|---|---|---|"])
-            for finding in effective[:_MAX_FINDINGS_IN_REPORT]:
+        prod = [f for f in effective if f.scope != "development"]
+        dev = [f for f in effective if f.scope == "development"]
+        if prod:
+            label = "Production findings" if dev else "Findings"
+            lines.extend(["", f"**{label}**", "", "| Severity | Rule | Location | Detail |", "|---|---|---|---|"])
+            for finding in prod[:_MAX_FINDINGS_IN_REPORT]:
                 lines.append(_finding_row(finding))
-            if len(effective) > _MAX_FINDINGS_IN_REPORT:
+            if len(prod) > _MAX_FINDINGS_IN_REPORT:
                 lines.append(
-                    f"\n*{len(effective) - _MAX_FINDINGS_IN_REPORT} more effective finding(s) "
+                    f"\n*{len(prod) - _MAX_FINDINGS_IN_REPORT} more production finding(s) "
                     "are available in the JSON export.*"
                 )
-        else:
+        elif not dev:
             lines.append("No matching risk patterns were found.")
+
+        if dev:
+            lines.extend(
+                [
+                    "",
+                    "<details>",
+                    f"<summary>{len(dev)} development-only finding(s) (collapsed)</summary>",
+                    "",
+                    "These affect dev/test dependencies. They still count toward the verdict "
+                    "because build-tool vulnerabilities can compromise the release pipeline.",
+                    "",
+                    "| Severity | Rule | Location | Detail |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for finding in dev[:_MAX_FINDINGS_IN_REPORT]:
+                lines.append(_finding_row(finding))
+            if len(dev) > _MAX_FINDINGS_IN_REPORT:
+                lines.append(
+                    f"\n*{len(dev) - _MAX_FINDINGS_IN_REPORT} more development finding(s) "
+                    "are available in the JSON export.*"
+                )
+            lines.extend(["", "</details>"])
 
         suppressed = scan.suppressed_findings
         if suppressed:

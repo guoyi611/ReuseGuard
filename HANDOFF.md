@@ -887,3 +887,69 @@ reports/test-2d-pixel-after-fix.md（reports/ 已 gitignore）。
 
 汇报：先说人话，再说改了什么、验证结果、下一步。
 ```
+
+## 4.14 本会话（2026-11-12）：scanner-hardening 五项加固
+
+在 `feat/scanner-hardening` worktree 完成五项扫描器加固，全部测试通过（402 passed），
+ruff 全绿，已 push。
+
+### 4.14.1 OSV 默认 `--no-resolve` + `--osv-offline DB_PATH`
+
+- `_build_argv` 默认追加 `--no-resolve`，收紧 registry 访问；用户可用新 CLI
+  `--osv-resolve` 显式恢复传递依赖解析。
+- 新增 `--osv-offline DB_PATH`：DB_PATH 必须存在且是目录；适配器同时传
+  `--offline --local-db <path>`；与 `--osv-resolve` 互斥（离线模式下无 registry）。
+- Settings 新增 `osv_no_resolve`（默认 True）、`osv_offline_db`；进入 `public_dict()`。
+- 测试：argv 构造、互斥校验、路径不存在/非目录报错、CLI 转发。
+
+### 4.14.2 OSV dev/prod 分层显示
+
+- `Finding` 新增可选字段 `scope: str | None`（"production" / "development" / None）。
+- OSV 适配器按 lockfile 信号推断 scope：npm `package-lock.json` 的 `dev`/`optional`
+  标记、pip `requirements-dev.txt` / `requirements-test.txt` 文件名约定。未知生态
+  保留 None，不猜。
+- 同一 advisory 命中 prod+dev 包时聚合为 production（保守）。
+- Markdown：summary 行显示 "N production + M development"；prod findings 先列，
+  dev findings 折叠在 `<details>` 块并标注"仍计入 verdict"。
+- JSON：`Finding.scope` 自动序列化。
+- severity / verdict / risk 计算不变；dev 漏洞仍影响结论（构建链风险）。
+
+### 4.14.3 CVSS 向量/分数与 advisory 标签同时显示
+
+- 新增 `_cvss_label()` 从 `database_specific.cvss.score` / `.vectorString` 提取
+  人类可读摘要；不改 severity 判定（仍按 advisory 标签）。
+- Finding.evidence 末尾追加 CVSS 摘要；Finding.message 追加
+  "Advisory severity <TAG>; CVSS <score> (<source>)." 让用户看到两种口径差异。
+- 原始 advisory 标签（如 MODERATE）单独记录，不被映射后的 ReuseGuard severity
+  覆盖。
+- 无 CVSS 数据的 advisory 渲染不变。
+
+### 4.14.4 gitleaks `--gitleaks-config PATH`（强制 useDefault）
+
+- 新增 `--gitleaks-config PATH`：TOML 文件，必须存在且是文件；隐含开启 `--gitleaks`。
+- 适配器读取用户 TOML 后检查是否已有 `[extend] useDefault = true`；没有就追加。
+  团队可加自定义 `[[rules]]`，但不能关掉默认规则集。
+- 仓库内 `.gitleaks.toml` 仍被忽略（`--config` 指向私有临时文件）。
+- 缺文件/不可读 → scan error，不静默降级。
+- 零依赖：用简单字符串匹配而非 TOML 解析器。
+
+### 4.14.5 Semgrep 验收文档
+
+- 新增 `docs/semgrep-acceptance.md`：列出真实二进制验收步骤、预期结果、
+  `.semgrepignore` 影响验证方法、失败处理、验收后要更新的文件清单。
+- **未实际执行**：等用户提供本地规则目录。不要为了跑通用 `--config auto`。
+
+### 4.14.6 约束遵守情况
+
+- 未改召回 / verdict 核心判定 / sandbox / report 渲染（除 scanner 相关 caveat）。
+- 未静默降级：所有工具失败仍是 scan error。
+- 每步补测试 → pytest + ruff → commit + push（SSH）。
+- 测试数 375 → 402（+27），ruff 全绿。
+
+### 4.14.7 下一步
+
+- 用户提供 Semgrep 规则后按 `docs/semgrep-acceptance.md` 跑真实验收，结果写回
+  HANDOFF 4.2 / 9.2。
+- 完成后 rebase `github/develop`，开 PR → develop。
+- 开放问题（project.md §12 #11–#14）本轮已全部处理；剩余 #7（`.semgrepignore`
+  覆盖缺口）待 Semgrep 验收后决定缓解方案。

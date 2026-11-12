@@ -104,6 +104,8 @@ class _Advisory:
     ecosystem: str = ""
     packages: list[str] | None = None
     scope: str | None = None
+    cvss_label: str | None = None
+    advisory_severity_label: str | None = None
 
     def __post_init__(self) -> None:
         if self.packages is None:
@@ -283,6 +285,10 @@ def _collect_advisories(
                     severity = _severity(vulnerability)
                     if severity.rank > advisory.severity.rank:
                         advisory.severity = severity
+                    if advisory.cvss_label is None:
+                        advisory.cvss_label = _cvss_label(vulnerability)
+                    if advisory.advisory_severity_label is None:
+                        advisory.advisory_severity_label = _advisory_severity_label(vulnerability)
                 # Scope aggregation: any production package makes the advisory
                 # production-scoped; unknown scopes leave the advisory untagged
                 # rather than guessed. Pure-development advisories are tagged
@@ -396,9 +402,14 @@ def _to_finding(
     message = f"{summary} {detail}"[:_MAX_MESSAGE]
 
     ecosystem = f" ({advisory.ecosystem})" if advisory.ecosystem else ""
-    evidence = (f"{'; '.join(packages[:3])}{ecosystem} · https://osv.dev/vulnerability/{primary}")[
-        :_MAX_EVIDENCE
-    ]
+    cvss_tail = f" · {advisory.cvss_label}" if advisory.cvss_label else ""
+    evidence = (
+        f"{'; '.join(packages[:3])}{ecosystem}{cvss_tail} · "
+        f"https://osv.dev/vulnerability/{primary}"
+    )[:_MAX_EVIDENCE]
+    if advisory.cvss_label:
+        sev_tag = advisory.advisory_severity_label or advisory.severity.value.upper()
+        message = f"{message} Advisory severity {sev_tag}; {advisory.cvss_label}."[:_MAX_MESSAGE]
 
     reason = suppression_reason(advisory.lockfile, suppress_globs)
     scope = advisory.scope
@@ -442,6 +453,48 @@ def _severity(vulnerability: dict) -> RiskLevel:
     # A CVSS vector is not re-scored locally: too easy to get wrong, and a wrong
     # "critical" would be worse than an honest "medium".
     return RiskLevel.MEDIUM
+
+
+def _advisory_severity_label(vulnerability: dict) -> str | None:
+    """Return the raw advisory severity tag (e.g. MODERATE, HIGH) if present."""
+    for key in ("database_specific", "ecosystem_specific"):
+        specific = vulnerability.get(key)
+        if not isinstance(specific, dict):
+            continue
+        value = specific.get("severity")
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+    return None
+
+
+def _cvss_label(vulnerability: dict) -> str | None:
+    """Extract a human-readable CVSS summary without re-scoring.
+
+    Returns ``"CVSS <score> (<source>)"`` when a numeric score is present, or
+    ``"CVSS vector: <...>"`` when only the vector string is available. The
+    label is meant for display alongside the advisory severity tag so readers
+    can see both signals; ReuseGuard never uses it to override the advisory's
+    own severity classification.
+    """
+    for key in ("database_specific", "ecosystem_specific"):
+        specific = vulnerability.get(key)
+        if not isinstance(specific, dict):
+            continue
+        cvss = specific.get("cvss")
+        if isinstance(cvss, dict):
+            score = cvss.get("score")
+            source = cvss.get("type") or cvss.get("source")
+            if isinstance(score, (int, float)):
+                suffix = f" ({source})" if isinstance(source, str) and source.strip() else ""
+                return f"CVSS {score:g}{suffix}"[:60]
+            vector = cvss.get("vectorString")
+            if isinstance(vector, str) and vector.strip():
+                return f"CVSS vector: {vector.strip()}"[:80]
+        # Some advisories put the score directly under database_specific.
+        direct_score = specific.get("cvss_v3_score") or specific.get("severity_score")
+        if isinstance(direct_score, (int, float)):
+            return f"CVSS {direct_score:g}"[:40]
+    return None
 
 
 def _results(payload: object) -> list | None:

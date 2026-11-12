@@ -623,3 +623,53 @@ def test_unknown_ecosystem_scope_is_none(tmp_path: Path) -> None:
     report = _scanner(_Runner(_payload(results))).scan(root)
 
     assert report.findings[0].scope is None
+
+
+def _vuln_with_cvss(
+    score: float | None = 7.5,
+    vector: str | None = None,
+    source: str | None = "NVD",
+    severity_label: str | None = "MODERATE",
+) -> dict:
+    vuln = _vuln(severity=severity_label)
+    cvss: dict = {}
+    if score is not None:
+        cvss["score"] = score
+    if vector is not None:
+        cvss["vectorString"] = vector
+    if source is not None:
+        cvss["type"] = source
+    vuln["database_specific"] = {**(vuln.get("database_specific") or {}), "cvss": cvss}
+    return vuln
+
+
+def test_cvss_score_is_shown_alongside_advisory_severity(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package(vulnerabilities=[_vuln_with_cvss()])])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    finding = report.findings[0]
+    # Severity still comes from the advisory label, not the CVSS score.
+    assert finding.severity is RiskLevel.MEDIUM
+    assert "CVSS 7.5 (NVD)" in (finding.evidence or "")
+    assert "Advisory severity MODERATE; CVSS 7.5 (NVD)" in finding.message
+
+
+def test_cvss_vector_only_is_rendered_when_score_missing(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    vector = "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    results = [_result(packages=[_package(vulnerabilities=[_vuln_with_cvss(score=None, vector=vector)])])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    finding = report.findings[0]
+    assert f"CVSS vector: {vector}" in (finding.evidence or "")
+
+
+def test_no_cvss_data_leaves_evidence_unchanged(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package(vulnerabilities=[_vuln(severity="HIGH")])])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    finding = report.findings[0]
+    assert "CVSS" not in (finding.evidence or "")
+    assert "CVSS" not in finding.message

@@ -179,6 +179,50 @@ def test_discover_only_flag_defaults_off() -> None:
     assert parser.parse_args(["check", "acme/seed", "--discover-only"]).discover_only is True
 
 
+def test_strict_idea_flag_defaults_off() -> None:
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["check", "acme/seed"]).strict_idea is False
+    assert parser.parse_args(["check", "--idea", "x", "--strict-idea"]).strict_idea is True
+
+
+def test_strict_idea_setting_is_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "strict.md"
+    report = build_demo_report()
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run_idea(self, _idea, *, language=None):
+            return report
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "--idea",
+            "AI pixel art generator",
+            "--no-scan",
+            "--strict-idea",
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.strict_idea is True
+
+
 def test_check_requires_exactly_one_input(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["check"]) == 2
     assert cli.main(["check", "acme/seed", "--idea", "x"]) == 2

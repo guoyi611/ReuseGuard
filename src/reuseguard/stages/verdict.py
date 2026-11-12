@@ -37,6 +37,10 @@ def decide(
         "Static analysis cannot prove the absence of malicious code.",
         *_scanner_limitations(scan),
     ]
+    if not repo.license_spdx:
+        base_limitations.append(
+            "The repository does not declare an SPDX license; reuse rights are unconfirmed."
+        )
 
     if filter_result.status is FilterStatus.SKIPPED:
         return Verdict(

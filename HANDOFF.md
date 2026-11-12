@@ -887,3 +887,51 @@ reports/test-2d-pixel-after-fix.md（reports/ 已 gitignore）。
 
 汇报：先说人话，再说改了什么、验证结果、下一步。
 ```
+
+## 4.14 本会话（2026-11-12）：发现质量 P1 — 查询约束、来源标注、许可证警告、评分权重
+
+在 `feat/discovery-quality` worktree 中完成四项 P1 改进：
+
+### 1. `--strict-idea` 查询字段约束
+
+`build_idea_queries()` 新增 `strict` 参数；启用时所有查询追加
+`in:name,description,topics` 限定符，避免短词（`ai`、`2d`）匹配 README 正文导致
+召回大量无关大仓库。CLI 新增 `--strict-idea` 开关，`Settings.strict_idea` 写入
+`public_dict()`。限定后召回数量下降是预期行为，不是回归。
+
+### 2. 候选来源标注
+
+`Candidate` 新增 `recalled_by: str | None` 字段，记录首次召回该仓库的查询文本。
+`recall_idea()` 和 `recall_similar()` 在去重时记录来源。Markdown 报告在每个仓库
+区块显示 `**Recalled by:**`；JSON 通过 `to_dict()` 自动包含。
+
+### 3. License unknown 警告
+
+当 `RepoMeta.license_spdx` 为空（GitHub 返回 null、NOASSERTION 或 NONE）时：
+- Markdown 报告在 Stats 行下方显式提示 "⚠️ License not declared: ... Manual
+  confirmation is required before reuse."
+- `decide()` 在 `base_limitations` 中追加 "The repository does not declare an SPDX
+  license; reuse rights are unconfirmed."
+
+### 4. 关键词得分权重复核
+
+`score_idea_similarity()` 重新分配权重：
+- 关键词覆盖率：40 → **50**（区分 name/topics 精确匹配 1.0 和 description 模糊
+  匹配 0.7）
+- 热度：20 → **10**
+- 语言 / 活跃度不变（各 20）
+
+效果：具体限定词（`template`、`beginner`、`lora`）对排名的影响增大，高 stars 但
+无关的仓库不再轻易淹没精确匹配的小项目。`score_similarity()`（种子模式）不受影响。
+
+### 验证
+
+- pytest：**390 passed**（+15 新测试）
+- ruff check：全绿
+- 未改动扫描器、verdict 判定逻辑、sandbox、外部扫描器代码
+- 未把"没有召回"写成"安全"
+
+### 下一步
+
+- 用真实 `--idea "AI 2D pixel art generator" --strict-idea` 重跑对比排序
+- 合并到 develop 前 rebase github/develop

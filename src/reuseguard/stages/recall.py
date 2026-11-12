@@ -246,14 +246,21 @@ def build_idea_queries(
     language: str | None = None,
     min_stars: int = 50,
     max_queries: int = 3,
+    strict: bool = False,
 ) -> list[str]:
     """Build search queries from a natural-language requirement.
 
     GitHub search treats bare terms as conjunctive, so a long sentence can
     return nothing. The first query uses up to four keywords; a second, broader
     query drops to the two strongest terms.
+
+    When ``strict`` is True, all queries include ``in:name,description,topics``
+    to avoid matching README body text. This reduces recall but greatly improves
+    precision for short or common keywords like ``ai`` or ``2d``.
     """
     qualifiers = [f"stars:>={max(0, min_stars)}", "fork:false"]
+    if strict:
+        qualifiers.append("in:name,description,topics")
     language_qualifier = f"language:{language}" if language else None
     keywords = [
         keyword
@@ -312,16 +319,22 @@ def recall_idea(
     min_stars: int = 50,
     language: str | None = None,
     now: datetime | None = None,
+    strict: bool = False,
 ) -> RecallResult:
-    """Search for repositories that match a free-form requirement."""
+    """Search for repositories that match a free-form requirement.
+
+    When ``strict`` is True, queries are constrained to name/description/topics
+    to avoid README body matches that flood results with unrelated large repos.
+    """
     if limit <= 0:
         return RecallResult()
 
-    queries = build_idea_queries(idea, language=language, min_stars=min_stars)
+    queries = build_idea_queries(idea, language=language, min_stars=min_stars, strict=strict)
     if not queries:
         return RecallResult(warnings=["No usable search terms were extracted from the idea."])
 
     found: dict[str, RepoMeta] = {}
+    recalled_by: dict[str, str] = {}
     warnings: list[str] = []
     invalid: set[str] = set()
     per_page = min(50, max(10, limit * 3))
@@ -339,7 +352,9 @@ def recall_idea(
             if not _has_parseable_name(repository):
                 invalid.add(repository.full_name)
                 continue
-            found.setdefault(repository.full_name, repository)
+            if repository.full_name not in found:
+                found[repository.full_name] = repository
+                recalled_by[repository.full_name] = query
 
     if invalid:
         warnings.append(_invalid_name_warning(invalid))
@@ -360,6 +375,7 @@ def recall_idea(
                 language=language,
                 now=moment,
             ),
+            recalled_by=recalled_by.get(repository.full_name),
         )
         for repository in found.values()
     ]
@@ -382,21 +398,36 @@ def score_idea_similarity(
 ) -> Similarity:
     """Score how well a candidate matches a requirement's keywords.
 
-    Keyword coverage is 40 points, language 20, recency 20, and popularity 20.
+    Keyword coverage is 50 points (with partial credit for description-only
+    matches), language 20, recency 20, and popularity 10. This weighting
+    prioritises precise term matches over raw star count so that specific
+    qualifiers like ``template`` or ``lora`` are not drowned out by large but
+    unrelated repositories.
+
     With no language filter, the language component is a neutral 10.
     """
     moment = now or datetime.now(timezone.utc)
-    searchable = " ".join(
-        [
-            candidate.full_name,
-            candidate.description or "",
-            " ".join(candidate.topics),
-        ]
-    ).lower()
-    tokens = set(re.findall(r"[a-z0-9+#.-]+", searchable))
 
-    matched = sum(1 for keyword in keywords if keyword in tokens)
-    keyword_score = 40.0 * matched / len(keywords) if keywords else 0.0
+    # Separate name/topics tokens from description tokens to distinguish
+    # precise matches from README-body noise.
+    name_topics = " ".join(
+        [candidate.full_name, " ".join(candidate.topics)]
+    ).lower()
+    name_topics_tokens = set(re.findall(r"[a-z0-9+#.-]+", name_topics))
+    description_tokens = set(
+        re.findall(r"[a-z0-9+#.-]+", (candidate.description or "").lower())
+    )
+
+    if keywords:
+        weighted_hits = 0.0
+        for keyword in keywords:
+            if keyword in name_topics_tokens:
+                weighted_hits += 1.0
+            elif keyword in description_tokens:
+                weighted_hits += 0.7
+        keyword_score = 50.0 * weighted_hits / len(keywords)
+    else:
+        keyword_score = 0.0
 
     if language:
         language_score = 20.0 if (candidate.language or "").lower() == language.lower() else 0.0
@@ -404,7 +435,7 @@ def score_idea_similarity(
         language_score = 10.0
 
     recency_score = _recency_component(candidate, moment)
-    popularity_score = _popularity_component(candidate)
+    popularity_score = _popularity_component(candidate, max_points=10.0)
     total = round(keyword_score + language_score + recency_score + popularity_score, 1)
 
     return Similarity(
@@ -430,6 +461,7 @@ def recall_similar(
 
     queries = build_queries(seed, min_stars=min_stars)
     found: dict[str, RepoMeta] = {}
+    recalled_by: dict[str, str] = {}
     warnings: list[str] = []
     invalid: set[str] = set()
     per_page = min(50, max(10, limit * 3))
@@ -449,7 +481,9 @@ def recall_similar(
                 continue
             if repository.full_name.lower() == seed.full_name.lower():
                 continue
-            found.setdefault(repository.full_name, repository)
+            if repository.full_name not in found:
+                found[repository.full_name] = repository
+                recalled_by[repository.full_name] = query
 
     if invalid:
         warnings.append(_invalid_name_warning(invalid))
@@ -460,6 +494,7 @@ def recall_similar(
             repo=repository,
             role="alternative",
             similarity=score_similarity(seed, repository, now=moment),
+            recalled_by=recalled_by.get(repository.full_name),
         )
         for repository in found.values()
     ]
@@ -517,8 +552,8 @@ def _recency_component(candidate: RepoMeta, moment: datetime) -> float:
     return 20.0 * max(0.0, 1.0 - days / 1095.0)
 
 
-def _popularity_component(candidate: RepoMeta) -> float:
-    return 20.0 * min(1.0, math.log10(max(candidate.stars, 1) + 1) / 5.0)
+def _popularity_component(candidate: RepoMeta, *, max_points: float = 20.0) -> float:
+    return max_points * min(1.0, math.log10(max(candidate.stars, 1) + 1) / 5.0)
 
 
 def _finalize_queries(queries: list[str], *, max_queries: int) -> list[str]:

@@ -168,6 +168,8 @@ def _render_assessment(
 
     lines.append(f"- **Repository:** [{repo.full_name}]({_repo_url(repo)})")
     lines.append(f"- **Role:** {_role(assessment)}")
+    if assessment.candidate.recalled_by:
+        lines.append(f"- **Recalled by:** `{_code(assessment.candidate.recalled_by, 260)}`")
     if assessment.candidate.similarity:
         similarity = assessment.candidate.similarity
         components: list[str] = []
@@ -183,11 +185,17 @@ def _render_assessment(
             ]
         )
         lines.append(f"- **Similarity:** {similarity.total:.1f}/100 ({' · '.join(components)})")
+    license_display = repo.license_spdx or "license unknown"
     lines.append(
         f"- **Stats:** {repo.stars:,} stars · {repo.forks:,} forks · "
         f"{_md(repo.language or 'language unknown', 40)} · "
-        f"{_md(repo.license_spdx or 'license unknown', 40)}"
+        f"{_md(license_display, 40)}"
     )
+    if not repo.license_spdx:
+        lines.append(
+            "- ⚠️ **License not declared:** the repository does not specify an SPDX "
+            "license. Manual confirmation is required before reuse."
+        )
     lines.append(
         f"- **Activity:** last push {_format_date(repo.pushed_at) or 'unknown'} · "
         f"created {_format_date(repo.created_at) or 'unknown'}"

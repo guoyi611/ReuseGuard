@@ -181,6 +181,7 @@ class Candidate:
     repo: RepoMeta
     role: str = "alternative"
     similarity: Similarity | None = None
+    recalled_by: str | None = None
 
     @property
     def is_seed(self) -> bool:

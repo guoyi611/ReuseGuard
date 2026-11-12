@@ -44,9 +44,11 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 外部扫描器：osv-scanner 适配器（`--osv`，lockfile 依赖漏洞、别名合并、追加合并）
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--discover-only`（配合 `--no-scan`）、`--config`、
-  `--semgrep-config`、`--gitleaks`、`--osv`、`--sandbox`、`demo`、`--fail-on`、
-  `--keep-workdir`
+- CLI：`check`、`--idea`、`--strict-idea`、`--discover-only`（配合 `--no-scan`）、
+  `--config`、`--semgrep-config`、`--gitleaks`、`--osv`、`--sandbox`、`demo`、
+  `--fail-on`、`--keep-workdir`
+- 发现质量 P1：查询字段约束（`in:name,description,topics`）、候选来源标注
+  （`recalled_by`）、license unknown 警告、关键词评分权重优化（50/20/20/10）
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
@@ -158,13 +160,18 @@ topic → 出现在仓库名里的 topic → 带连字符的 topic → 较短的
 1. 前 4 个关键词 + `--language` + stars / fork
 2. 前 2 个关键词 + `--language` + stars / fork（更宽）
 
-若没有 ASCII 关键词（例如纯中文需求），把清洗后的原文作为查询词。候选按以下 0–100
-分排序：
+`--strict-idea` 启用时，所有查询追加 `in:name,description,topics` 限定符，避免短词
+匹配 README 正文导致召回大量无关大仓库。限定后召回数量下降是预期行为。
 
-- 关键词覆盖率 × 40：仓库名、描述、topics 的 token 中命中了多少需求关键词
+若没有 ASCII 关键词（例如纯中文需求），把清洗后的原文作为查询词。每个候选记录
+`recalled_by`（首次召回它的查询文本），在 Markdown 和 JSON 中展示。
+
+候选按以下 0–100 分排序：
+
+- 关键词覆盖率 × **50**：name/topics 精确匹配计 1.0，description 模糊匹配计 0.7
 - 语言：指定语言时相同 20，不同 0；未指定时中性 10
 - 最近 push：20
-- 热度：20
+- 热度：**10**（降低以避免淹没具体限定词）
 
 `--idea` 模式不评估种子仓库，所有候选的 role 为 `candidate`；报告头使用 `Idea:` 而不是
 `Seed:`。`--idea` 与 URL 互斥，且不能与 `--no-recall` 同用。
@@ -583,6 +590,11 @@ reuseguard check psf/requests --no-recall --osv
   - `--discover-only`：扫描关闭时 Markdown 隐藏结论，JSON 用 `withheld` 标记；
     不改变 `decide()`
   - 召回边界过滤非法仓库名（`owner/.github`），写 warning，不再中断整次运行
+- **发现质量 P1（2026-11-12，已完成）**：
+  - `--strict-idea`：查询追加 `in:name,description,topics` 限定符
+  - 候选来源标注：`Candidate.recalled_by` 记录首次召回查询
+  - License unknown 警告：报告 + verdict limitations 显式提示
+  - 关键词评分权重：50/20/20/10，区分精确/模糊匹配
 
 ## 11. 决策记录
 
@@ -618,6 +630,11 @@ reuseguard check psf/requests --no-recall --osv
 | OSV 缺 severity | 保守为 medium，不本地算 CVSS | 算错成 critical 比保守的 medium 更糟 |
 | OSV 无 lockfile | `truncated=True` → 至少 INSPECT | “没找到 lockfile”不能写成“没有漏洞依赖” |
 
+| `--strict-idea` | 追加 `in:name,description,topics` | 短词匹配 README 会召回无关大仓库；限定后召回下降是预期行为 |
+| 候选来源标注 | `Candidate.recalled_by` | 用户需要知道每个候选由哪条查询召回，便于调试查询策略 |
+| License unknown | 报告 + verdict limitations 显式提示 | 未声明许可证的仓库复用权利不明，必须人工确认 |
+| 关键词评分权重 | 50/20/20/10，精确匹配 1.0 / 模糊 0.7 | 具体限定词不应被 stars 淹没；description-only 匹配降权避免 README 噪音 |
+
 ## 12. 开放问题
 
 1. **召回质量**：topic 稀疏的仓库召回效果有限；是否需要 LLM 扩展查询？
@@ -646,9 +663,8 @@ reuseguard check psf/requests --no-recall --osv
     是否加“只看生产依赖”的开关，或在报告里把 dev/prod 分层显示？
 14. **依赖漏洞的等级口径**：当前用 advisory 标签；实测 osv-scanner 按 CVSS 会多报一条
     High（GitHub 标 MODERATE、CVSS ≥ 7）。是否本地实现 CVSS v3 计算，或同时显示两种口径？
-15. **短词召回噪音**：`ai` / `2d` 进入查询后，GitHub 会匹配 README，可能召回
-    `china-dictatorship` 这类同时包含这些词的大仓库。是否给 `--idea` 查询加
-    `in:name,description,topics`，或提供 `--strict-idea`？
+15. ~~**短词召回噪音**~~：**已解决**（2026-11-12）。`--strict-idea` 新增
+    `in:name,description,topics` 限定符；关键词评分区分精确/模糊匹配；热度权重降至 10。
 
 ## 13. 如何扩展
 

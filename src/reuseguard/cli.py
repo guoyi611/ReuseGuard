@@ -108,6 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     check.add_argument(
+        "--strict-idea",
+        action="store_true",
+        help=(
+            "constrain --idea searches to repository name, description, and topics; "
+            "reduces recall but avoids README body matches that flood results with "
+            "unrelated large repositories"
+        ),
+    )
+    check.add_argument(
         "--semgrep-config",
         type=Path,
         metavar="PATH",
@@ -447,6 +456,7 @@ def _run_check(args: argparse.Namespace) -> int:
         enable_scorecard=enable_scorecard,
         enable_scan=enable_scan,
         discover_only=args.discover_only,
+        strict_idea=args.strict_idea,
         semgrep_config=str(args.semgrep_config) if args.semgrep_config else None,
         semgrep_timeout=semgrep_timeout,
         enable_gitleaks=args.gitleaks,

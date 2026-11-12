@@ -380,8 +380,16 @@ class Pipeline:
             # Secret scanning is additive: it never replaces the scanner above,
             # because secrets and install hooks are different evidence.
             try:
+                user_config = (
+                    Path(self.settings.gitleaks_config)
+                    if self.settings.gitleaks_config is not None
+                    else None
+                )
                 gitleaks = GitleaksScanner(
-                    GitleaksOptions(process_timeout=self.settings.gitleaks_timeout),
+                    GitleaksOptions(
+                        process_timeout=self.settings.gitleaks_timeout,
+                        user_config=user_config,
+                    ),
                     runner=self._gitleaks_runner,
                 )
                 scans.append(

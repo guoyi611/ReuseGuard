@@ -105,10 +105,18 @@ class GitleaksUnavailable(GitleaksError):
 
 @dataclass(frozen=True)
 class GitleaksOptions:
-    """How to invoke gitleaks for one repository snapshot."""
+    """How to invoke gitleaks for one repository snapshot.
+
+    ``user_config`` optionally points at a team-supplied TOML file with custom
+    rules. When provided, the adapter merges it with a mandatory
+    ``[extend] useDefault = true`` block so the built-in rule set cannot be
+    disabled. The scanned repository's own ``.gitleaks.toml`` is still ignored
+    because ``--config`` always points at our private temporary file.
+    """
 
     binary: str = DEFAULT_GITLEAKS_BINARY
     process_timeout: float = DEFAULT_PROCESS_TIMEOUT
+    user_config: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.binary.strip():
@@ -152,7 +160,11 @@ class GitleaksScanner:
         with tempfile.TemporaryDirectory(prefix="reuseguard-gitleaks-") as directory:
             workspace = Path(directory)
             config = workspace / "reuseguard-gitleaks.toml"
-            config.write_text(_POLICY_CONFIG, encoding="utf-8")
+            try:
+                effective_config = _build_effective_config(self.options.user_config)
+            except GitleaksError as exc:
+                return ScanReport(status=ScanStatus.ERROR, scanner="gitleaks", error=str(exc))
+            config.write_text(effective_config, encoding="utf-8")
             report_path = workspace / "report.json"
 
             argv = self._build_argv(root_resolved, workspace, config, report_path, limits)
@@ -392,6 +404,53 @@ def _command_error(returncode: int, stderr: str, stdout: str) -> ScanReport:
         scanner="gitleaks",
         error=f"gitleaks exited with status {returncode}: {detail}",
     )
+
+
+def _build_effective_config(user_config: Path | None) -> str:
+    """Return a gitleaks TOML config that always extends the built-in rules.
+
+    When no user config is supplied the adapter uses its minimal default policy.
+    When a team-supplied TOML is provided, its contents are preserved and an
+    ``[extend] useDefault = true`` block is appended unless one is already
+    present. This keeps the security boundary intact without requiring a full
+    TOML parser: teams can add custom ``[[rules]]`` but cannot switch off the
+    default rule set, and the scanned repository's own ``.gitleaks.toml`` is
+    still ignored because ``--config`` points at this generated file.
+    """
+    if user_config is None:
+        return _POLICY_CONFIG
+    try:
+        text = user_config.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GitleaksError(f"could not read gitleaks config {user_config}: {exc}") from exc
+    if _has_extend_use_default(text):
+        return text
+    suffix = "\n# Injected by ReuseGuard: keep the built-in rule set enabled.\n[extend]\nuseDefault = true\n"
+    return text.rstrip() + suffix
+
+
+def _has_extend_use_default(text: str) -> bool:
+    """Best-effort check for an existing ``[extend] useDefault = true`` block.
+
+    This is intentionally conservative: it looks for both tokens on their own
+    lines rather than parsing TOML, so a commented-out or misspelled block is
+    treated as missing and the safety block is appended again (gitleaks will
+    just see the last value for the key).
+    """
+    in_extend = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[extend]":
+            in_extend = True
+            continue
+        if line.startswith("[") and line != "[extend]":
+            in_extend = False
+            continue
+        if in_extend and line.lower().startswith("usedefault") and "true" in line.lower():
+            return True
+    return False
 
 
 def _max_target_megabytes(limits: ScanLimits) -> int:

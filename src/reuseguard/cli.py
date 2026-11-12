@@ -139,6 +139,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="overall gitleaks process limit, 10-3600 (default: 300)",
     )
     check.add_argument(
+        "--gitleaks-config",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "TOML file with custom gitleaks rules; ReuseGuard always forces "
+            "[extend] useDefault = true so the built-in rule set cannot be disabled. "
+            "The scanned repository's own .gitleaks.toml is still ignored."
+        ),
+    )
+    check.add_argument(
         "--osv",
         action="store_true",
         help=(
@@ -384,9 +394,26 @@ def _run_check(args: argparse.Namespace) -> int:
             )
 
     gitleaks_timeout = _pick(args.gitleaks_timeout, None, 300.0)
+    gitleaks_config: Path | None = args.gitleaks_config
+    if gitleaks_config is not None:
+        # Supplying a custom config implies the user wants gitleaks enabled.
+        args.gitleaks = True
     if args.gitleaks_timeout is not None and not args.gitleaks:
         print("error: --gitleaks-timeout requires --gitleaks", file=sys.stderr)
         return 2
+    if gitleaks_config is not None:
+        if not gitleaks_config.exists():
+            print(
+                f"error: gitleaks config path does not exist: {gitleaks_config}",
+                file=sys.stderr,
+            )
+            return 2
+        if not gitleaks_config.is_file():
+            print(
+                f"error: gitleaks config path must be a file: {gitleaks_config}",
+                file=sys.stderr,
+            )
+            return 2
     if args.gitleaks:
         if not enable_scan:
             print(
@@ -499,6 +526,7 @@ def _run_check(args: argparse.Namespace) -> int:
         semgrep_timeout=semgrep_timeout,
         enable_gitleaks=args.gitleaks,
         gitleaks_timeout=gitleaks_timeout,
+        gitleaks_config=str(gitleaks_config) if gitleaks_config is not None else None,
         enable_osv=args.osv,
         osv_timeout=osv_timeout,
         osv_no_resolve=osv_no_resolve,

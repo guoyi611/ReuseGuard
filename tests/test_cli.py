@@ -415,6 +415,65 @@ def test_gitleaks_settings_are_forwarded_to_the_pipeline(
     assert settings.gitleaks_timeout == 120.0
 
 
+def test_gitleaks_config_implies_enable_and_is_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "team.toml"
+    cfg.write_text("[[rules]]\nid = \"x\"\n", encoding="utf-8")
+    output = tmp_path / "out.md"
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--gitleaks-config",
+            str(cfg),
+            "-o",
+            str(output),
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.enable_gitleaks is True
+    assert settings.gitleaks_config == str(cfg)
+
+
+def test_gitleaks_config_requires_existing_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "nope.toml"
+    code = cli.main(["check", "acme/seed", "--gitleaks-config", str(missing)])
+
+    assert code == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_gitleaks_config_rejects_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = tmp_path / "cfgdir"
+    directory.mkdir()
+    code = cli.main(["check", "acme/seed", "--gitleaks-config", str(directory)])
+
+    assert code == 2
+    assert "must be a file" in capsys.readouterr().err
+
+
 # --- OSV --------------------------------------------------------------------
 
 

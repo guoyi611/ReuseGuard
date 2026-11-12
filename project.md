@@ -277,13 +277,18 @@ scan risk low/none:
 - `thresholds`：`scorecard_min`、`use_scorecard_min`
 - `limits`：候选数、星标门槛、下载 / 扫描上限、超时
 - `features`：`recall` / `scorecard` / `scan` 开关
-- `rules.disable`：按 rule ID 关闭规则
-- `rules.severity`：把规则覆盖为 low / medium / high / critical
+- `rules.disable`：按 rule ID 关闭规则（支持内置 ID 和带已知前缀的外部 ID）
+- `rules.severity`：把规则覆盖为 low / medium / high / critical（同上）
 - `suppress.paths`：额外抑制 glob
 
-优先级：显式 CLI > YAML > 内置默认。未知 key、未知 rule ID、非法 severity 或类型错误
-都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()` 会把最终生效的
-规则策略写入报告，便于审计。
+外部规则 ID 采用**已知前缀白名单**：`gitleaks:`、`osv:`、`semgrep:`。例如
+`gitleaks:aws-access-token`、`osv:GHSA-abcd-1234-wxyz`、
+`semgrep:python.lang.security.eval-detected` 都是合法的 rule ID。未知前缀
+（如 `bandit:`、拼写错误 `gitleak:`）仍然报 `ConfigError`。
+
+优先级：显式 CLI > YAML > 内置默认。未知 key、未知 rule ID（含未知前缀）、非法
+severity 或类型错误都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()`
+会把最终生效的规则策略写入报告，便于审计。
 
 ### 7.7 沙箱隔离检查（M4，默认关闭）
 
@@ -573,7 +578,8 @@ reuseguard check psf/requests --no-recall --osv
   - osv-scanner 适配器（追加式）
     - `adapters/osv.py`：`scan source --recursive`、别名分组、退出码语义、缺 lockfile 标记
     - `--osv` / `--osv-timeout`；依赖漏洞按 advisory 标签定级
-  - 待办：外部规则 ID 进入 `rules.disable` / `rules.severity`；OSV 离线数据库；真实二进制验收
+  - 外部规则 ID 进入 `rules.disable` / `rules.severity`（已知前缀白名单，已完成）
+  - 待办：OSV 离线数据库；真实二进制验收
 - **M6（已完成）**：YAML 策略
   - `--config PATH`
   - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob

@@ -27,7 +27,7 @@ features:
   scan: true
 
 rules:
-  # Rule IDs available in this version:
+  # Built-in rule IDs available in this version:
   #   py-eval-exec, py-shell-true, py-os-command, py-unsafe-deserialize,
   #   py-marshal-loads, py-encoded-exec, js-eval, js-new-function,
   #   js-child-process, js-encoded-eval, download-pipe-shell,
@@ -36,12 +36,18 @@ rules:
   #   generic-secret, rm-rf-root, chmod-777, npm-lifecycle,
   #   pth-startup-code, vscode-folder-open, ci-pwn-request,
   #   ci-write-all, docker-add-url, setup-cmdclass
+  #
+  # External scanner rule IDs are also accepted when prefixed with a known
+  # scanner name: gitleaks:, osv:, semgrep:. Unknown prefixes are rejected.
   disable: []
   severity: {}
-  # Example:
-  # disable: [generic-secret]
+  # Examples:
+  # disable:
+  #   - generic-secret            # built-in rule
+  #   - gitleaks:aws-access-token # external (gitleaks)
   # severity:
-  #   py-eval-exec: high
+  #   py-eval-exec: high          # built-in override
+  #   osv:GHSA-abcd-1234-wxyz: critical  # external (osv-scanner)
 
 suppress:
   # Glob patterns are matched against repository-relative POSIX paths.

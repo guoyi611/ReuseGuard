@@ -155,3 +155,149 @@ def test_cli_rejects_invalid_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     code = cli.main(["check", "acme/seed", "--config", str(path)])
 
     assert code == 2
+
+
+# ---------------------------------------------------------------------------
+# External rule IDs (gitleaks:, osv:, semgrep: prefixes)
+# ---------------------------------------------------------------------------
+
+
+def test_external_rule_ids_in_disable(tmp_path: Path) -> None:
+    """External scanner rule IDs with known prefixes are accepted in rules.disable."""
+    path = _write_policy(
+        tmp_path,
+        """
+rules:
+  disable:
+    - gitleaks:aws-access-token
+    - osv:GHSA-abcd-1234-wxyz
+    - semgrep:python.lang.security.eval-detected
+""",
+    )
+    policy = load_policy(path)
+    assert policy.disabled_rules == frozenset(
+        {
+            "gitleaks:aws-access-token",
+            "osv:GHSA-abcd-1234-wxyz",
+            "semgrep:python.lang.security.eval-detected",
+        }
+    )
+
+
+def test_external_rule_ids_in_severity(tmp_path: Path) -> None:
+    """External scanner rule IDs with known prefixes are accepted in rules.severity."""
+    path = _write_policy(
+        tmp_path,
+        """
+rules:
+  severity:
+    gitleaks:private-key: high
+    osv:CVE-2024-12345: critical
+    semgrep:javascript.express.security.audit.xss: medium
+""",
+    )
+    policy = load_policy(path)
+    assert policy.severity_overrides["gitleaks:private-key"] is RiskLevel.HIGH
+    assert policy.severity_overrides["osv:CVE-2024-12345"] is RiskLevel.CRITICAL
+    assert policy.severity_overrides["semgrep:javascript.express.security.audit.xss"] is RiskLevel.MEDIUM
+
+
+def test_mixed_builtin_and_external_rules(tmp_path: Path) -> None:
+    """Built-in and external rule IDs can coexist in the same policy."""
+    path = _write_policy(
+        tmp_path,
+        """
+rules:
+  disable:
+    - generic-secret
+    - gitleaks:generic-api-key
+  severity:
+    py-eval-exec: high
+    osv:GHSA-xxxx-yyyy-zzzz: low
+""",
+    )
+    policy = load_policy(path)
+    assert policy.disabled_rules == frozenset({"generic-secret", "gitleaks:generic-api-key"})
+    assert policy.severity_overrides["py-eval-exec"] is RiskLevel.HIGH
+    assert policy.severity_overrides["osv:GHSA-xxxx-yyyy-zzzz"] is RiskLevel.LOW
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Unknown prefix
+        "rules:\n  disable: [unknown-tool:some-rule]\n",
+        # Bare colon without known prefix
+        "rules:\n  disable: [custom:rule]\n",
+        # Empty prefix (starts with colon)
+        "rules:\n  disable: [:some-rule]\n",
+        # Unknown prefix in severity
+        "rules:\n  severity: {bandit:B101: high}\n",
+        # Typo in known prefix
+        "rules:\n  disable: [gitleak:aws-access-token]\n",
+    ],
+)
+def test_unknown_external_prefix_is_rejected(tmp_path: Path, text: str) -> None:
+    """Rule IDs with unknown prefixes are rejected as ConfigError."""
+    with pytest.raises(ConfigError):
+        load_policy(_write_policy(tmp_path, text))
+
+
+def test_external_rule_with_invalid_severity_is_rejected(tmp_path: Path) -> None:
+    """External rule IDs still require valid severity values."""
+    with pytest.raises(ConfigError):
+        load_policy(
+            _write_policy(
+                tmp_path,
+                "rules:\n  severity: {gitleaks:aws-access-token: severe}\n",
+            )
+        )
+
+
+def test_merge_scan_reports_dedup_unaffected_by_external_ids(tmp_path: Path) -> None:
+    """merge_scan_reports() deduplication works correctly with external rule IDs.
+
+    This verifies that external rule IDs don't break the existing dedup logic.
+    The merge function operates on ScanReport/Finding objects, not config, so
+    this is a sanity check that the pipeline still works end-to-end.
+    """
+    from reuseguard.models import Finding, RiskLevel, ScanReport, ScanStatus, merge_scan_reports
+
+    report_a = ScanReport(
+        status=ScanStatus.SCANNED,
+        risk=RiskLevel.HIGH,
+        findings=[
+            Finding(
+                rule_id="gitleaks:aws-access-token",
+                title="AWS token",
+                severity=RiskLevel.HIGH,
+                category="secret",
+                path="src/config.py",
+                line=10,
+                message="found",
+            ),
+        ],
+        files_scanned=5,
+        scanner="gitleaks",
+    )
+    report_b = ScanReport(
+        status=ScanStatus.SCANNED,
+        risk=RiskLevel.HIGH,
+        findings=[
+            Finding(
+                rule_id="gitleaks:aws-access-token",
+                title="AWS token",
+                severity=RiskLevel.HIGH,
+                category="secret",
+                path="src/config.py",
+                line=10,
+                message="found again",
+            ),
+        ],
+        files_scanned=3,
+        scanner="builtin-patterns",
+    )
+    merged = merge_scan_reports([report_a, report_b])
+    # Same (rule_id, path, line) should be deduplicated to one finding
+    assert len(merged.findings) == 1
+    assert merged.findings[0].rule_id == "gitleaks:aws-access-token"

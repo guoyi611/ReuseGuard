@@ -10,10 +10,33 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
+from reuseguard.adapters.behavior import (
+    DEFAULT_CPUS,
+    DEFAULT_MAX_WORK_FILES,
+    DEFAULT_MAX_WORK_MB,
+    DEFAULT_MEMORY_MB,
+    DEFAULT_PHASE_TIMEOUT_SECONDS,
+    DEFAULT_PIDS,
+    DEFAULT_TOTAL_TIMEOUT_SECONDS,
+    BehaviorConfigError,
+    BehaviorLimits,
+    BehaviorOptions,
+    normalize_image_reference,
+    validate_cpus,
+    validate_image_reference,
+    validate_max_work_files,
+    validate_max_work_mb,
+    validate_memory_mb,
+    validate_phase_timeout,
+    validate_pids,
+    validate_total_timeout,
+)
 from reuseguard.models import (
     Assessment,
     BehaviorImage,
-    BehaviorLimits,
+    BehaviorLimitsInfo,
     BehaviorMode,
     BehaviorPhase,
     BehaviorPhaseStatus,
@@ -124,7 +147,7 @@ def test_stream_default_trust_is_untrusted_repo_output() -> None:
 
 def test_limits_defaults_match_the_cli_defaults() -> None:
     limits = BehaviorLimits()
-
+    limits = BehaviorLimitsInfo()
     assert limits.total_timeout_seconds == 300.0
     assert limits.phase_timeout_seconds == 120.0
     assert limits.max_output_bytes == 65536
@@ -194,7 +217,7 @@ def _full_report() -> Report:
             "cpus": 1.0,
             "preflight_ok": True,
         },
-        limits=BehaviorLimits(),
+        limits=BehaviorLimitsInfo(),
         started_at=started,
         finished_at=finished,
         duration_seconds=42.1,
@@ -359,3 +382,152 @@ def test_to_jsonable_keeps_nested_enums_and_datetimes_as_strings() -> None:
     assert data["started_at"] == "2026-11-01T07:00:00+00:00"
     assert data["image"]["digest_verified"] is False
     assert data["phases"] == []
+
+
+# ---------------------------------------------------------------------------
+# Image references: report-only unless pinned by digest.
+# ---------------------------------------------------------------------------
+
+_DIGEST = "sha256:" + "0123456789abcdef" * 4
+_PINNED = f"python@sha256:{'0123456789abcdef' * 4}"
+
+
+def test_pinned_reference_is_accepted_unchanged() -> None:
+    # Returned verbatim: the evidence must match what was passed to docker.
+    assert validate_image_reference(_PINNED) == _PINNED
+    assert validate_image_reference(_PINNED) == _PINNED
+
+
+def test_reference_with_tag_and_digest_is_accepted() -> None:
+    reference = "ghcr.io/acme/runner:3.12" + "@" + _DIGEST
+
+    assert validate_image_reference(reference) == reference
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "python:3.12-slim",
+        "python",
+        "python:latest",
+        "ghcr.io/acme/runner:3.12",
+        "python@sha256:" + "0" * 63,
+        "python@sha256:" + "A" * 64,
+        "python@sha512:" + "0" * 64,
+        "python@sha256",
+        "@sha256:" + "0" * 64,
+        "python @sha256:" + "0" * 64,
+        "python" + "@sha256:" + "0" * 64 + "\t",
+        "python;rm@sha256:" + "0" * 64,
+        "",
+        "   ",
+    ],
+)
+def test_reference_without_a_valid_digest_is_rejected(reference: str) -> None:
+    with pytest.raises(BehaviorConfigError):
+        validate_image_reference(reference)
+
+
+def test_tag_rejection_says_the_tag_can_move() -> None:
+    with pytest.raises(BehaviorConfigError) as excinfo:
+        validate_image_reference("python:3.12-slim")
+
+    message = str(excinfo.value)
+    assert "pinned by digest" in message
+    assert "tags are refused because they can move" in message
+
+
+def test_image_names_are_case_insensitive_for_comparison() -> None:
+    upper = "Python@sha256:" + _PINNED[-64:]
+    lower = "python@sha256:" + _PINNED[-64:]
+
+    assert normalize_image_reference(upper) == normalize_image_reference(lower)
+
+
+# ---------------------------------------------------------------------------
+# Bounds from design section 12.1.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("validator", "value", "low", "high", "label"),
+    [
+        (validate_total_timeout, 30, 30, 1800, "behavior timeout"),
+        (validate_phase_timeout, 10, 10, 900, "behavior phase timeout"),
+        (validate_memory_mb, 128, 128, 4096, "behavior memory"),
+        (validate_cpus, 0.1, 0.1, 4.0, "behavior CPUs"),
+        (validate_pids, 16, 16, 512, "behavior PID limit"),
+        (validate_max_work_mb, 64, 64, 4096, "behavior work-dir size limit"),
+        (validate_max_work_files, 1000, 1000, 200000, "behavior work-dir file limit"),
+    ],
+)
+def test_boundaries_are_inclusive(validator, value, low: float, high: float, label: str) -> None:
+    assert validator(value) == value
+    assert validator(low) == low
+    assert validator(high) == high
+
+    for out_of_range in (low - 1 if isinstance(low, int) else 0.05, high + 1):
+        with pytest.raises(BehaviorConfigError) as excinfo:
+            validator(out_of_range)
+        assert label in str(excinfo.value)
+
+
+def test_cpu_limit_accepts_fractional_values_below_one() -> None:
+    assert validate_cpus(0.5) == 0.5
+    with pytest.raises(BehaviorConfigError):
+        validate_cpus(0.05)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_non_finite_numbers_are_rejected(value: float) -> None:
+    with pytest.raises(BehaviorConfigError):
+        validate_cpus(value)
+
+
+def test_booleans_are_not_numbers_here() -> None:
+    with pytest.raises(BehaviorConfigError):
+        validate_memory_mb(True)  # type: ignore[arg-type]
+    with pytest.raises(BehaviorConfigError):
+        validate_cpus(True)  # type: ignore[arg-type]
+
+
+def test_limits_defaults_match_the_documented_values() -> None:
+    limits = BehaviorLimits()
+
+    assert limits.total_timeout_seconds == DEFAULT_TOTAL_TIMEOUT_SECONDS == 300.0
+    assert limits.phase_timeout_seconds == DEFAULT_PHASE_TIMEOUT_SECONDS == 120.0
+    assert limits.memory_mb == DEFAULT_MEMORY_MB == 512
+    assert limits.cpus == DEFAULT_CPUS == 1.0
+    assert limits.pids == DEFAULT_PIDS == 128
+    assert limits.max_work_mb == DEFAULT_MAX_WORK_MB == 512
+    assert limits.max_work_files == DEFAULT_MAX_WORK_FILES == 50000
+
+
+def test_invalid_limits_cannot_be_constructed() -> None:
+    with pytest.raises(BehaviorConfigError):
+        BehaviorLimits(memory_mb=64)
+
+
+# ---------------------------------------------------------------------------
+# BehaviorOptions: an option object means "run this", so it must be complete.
+# ---------------------------------------------------------------------------
+
+
+def test_options_reject_the_off_mode_and_require_an_image() -> None:
+    with pytest.raises(BehaviorConfigError):
+        BehaviorOptions(mode=BehaviorMode.OFF, image=_PINNED)
+    with pytest.raises(BehaviorConfigError):
+        BehaviorOptions(mode=BehaviorMode.IMPORT, image="python:3.12-slim")
+
+
+def test_options_expand_all_into_the_fixed_phase_order() -> None:
+    limits = BehaviorLimits(total_timeout_seconds=600)
+    options = BehaviorOptions(
+        mode=BehaviorMode.ALL, image=_PINNED, limits=limits, keep_workdir=True
+    )
+
+    assert options.phases == ("import", "test")
+    assert options.limits is limits
+    assert options.keep_workdir is True
+    assert BehaviorOptions(mode=BehaviorMode.TEST, image=_PINNED).phases == ("test",)
+    assert BehaviorOptions(mode=BehaviorMode.IMPORT, image=_PINNED).phases == ("import",)

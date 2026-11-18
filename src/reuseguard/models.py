@@ -276,7 +276,7 @@ class ScanReport:
         detail = f"{effective} finding{'s' if effective != 1 else ''}"
         if suppressed:
             detail += f", {suppressed} suppressed"
-        return f"{self.risk.value} risk · {detail} · {self.files_scanned} files"
+        return f"{self.risk.value} risk 路 {detail} 路 {self.files_scanned} files"
 
 
 def merge_scan_reports(reports: Sequence[ScanReport]) -> ScanReport:
@@ -588,8 +588,12 @@ class BehaviorImage:
 
 
 @dataclass
-class BehaviorLimits:
-    """Limits one behavior run was planned with (design section 12.1)."""
+class BehaviorLimitsInfo:
+    """Limits one behavior run was planned with (design section 12.1).
+
+    This is the evidence copy recorded in a report. The request-side limits
+    with validation live in :mod:`reuseguard.adapters.behavior`.
+    """
 
     total_timeout_seconds: float = 300.0
     phase_timeout_seconds: float = 120.0
@@ -615,7 +619,7 @@ class BehaviorReport:
     platform: dict[str, Any] = field(default_factory=dict)
     image: BehaviorImage | None = None
     container: dict[str, Any] = field(default_factory=dict)
-    limits: BehaviorLimits = field(default_factory=BehaviorLimits)
+    limits: BehaviorLimitsInfo = field(default_factory=BehaviorLimitsInfo)
     started_at: datetime | None = None
     finished_at: datetime | None = None
     duration_seconds: float = 0.0

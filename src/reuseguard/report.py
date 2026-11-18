@@ -274,7 +274,15 @@ def _render_assessment(
         dev = [f for f in effective if f.scope == "development"]
         if prod:
             label = "Production findings" if dev else "Findings"
-            lines.extend(["", f"**{label}**", "", "| Severity | Rule | Location | Detail |", "|---|---|---|---|"])
+            lines.extend(
+                [
+                    "",
+                    f"**{label}**",
+                    "",
+                    "| Severity | Rule | Location | Detail |",
+                    "|---|---|---|---|",
+                ]
+            )
             for finding in prod[:_MAX_FINDINGS_IN_REPORT]:
                 lines.append(_finding_row(finding))
             if len(prod) > _MAX_FINDINGS_IN_REPORT:

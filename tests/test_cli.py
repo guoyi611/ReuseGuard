@@ -186,9 +186,7 @@ def test_strict_idea_flag_defaults_off() -> None:
     assert parser.parse_args(["check", "--idea", "x", "--strict-idea"]).strict_idea is True
 
 
-def test_strict_idea_setting_is_forwarded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_strict_idea_setting_is_forwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output = tmp_path / "strict.md"
     report = build_demo_report()
     captured: dict[str, object] = {}
@@ -463,7 +461,7 @@ def test_gitleaks_config_implies_enable_and_is_forwarded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = tmp_path / "team.toml"
-    cfg.write_text("[[rules]]\nid = \"x\"\n", encoding="utf-8")
+    cfg.write_text('[[rules]]\nid = "x"\n', encoding="utf-8")
     output = tmp_path / "out.md"
     captured: dict[str, object] = {}
 
@@ -628,9 +626,7 @@ def test_osv_offline_requires_existing_directory(
     assert "does not exist" in capsys.readouterr().err
 
 
-def test_osv_offline_rejects_file_path(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_osv_offline_rejects_file_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     file_path = tmp_path / "not-a-dir"
     file_path.write_text("x", encoding="utf-8")
     code = cli.main(["check", "acme/seed", "--osv", "--osv-offline", str(file_path)])
@@ -644,9 +640,7 @@ def test_osv_offline_and_resolve_are_mutually_exclusive(
 ) -> None:
     db = tmp_path / "db"
     db.mkdir()
-    code = cli.main(
-        ["check", "acme/seed", "--osv", "--osv-resolve", "--osv-offline", str(db)]
-    )
+    code = cli.main(["check", "acme/seed", "--osv", "--osv-resolve", "--osv-offline", str(db)])
 
     assert code == 2
     err = capsys.readouterr().err

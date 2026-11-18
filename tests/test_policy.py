@@ -199,7 +199,10 @@ rules:
     policy = load_policy(path)
     assert policy.severity_overrides["gitleaks:private-key"] is RiskLevel.HIGH
     assert policy.severity_overrides["osv:CVE-2024-12345"] is RiskLevel.CRITICAL
-    assert policy.severity_overrides["semgrep:javascript.express.security.audit.xss"] is RiskLevel.MEDIUM
+    assert (
+        policy.severity_overrides["semgrep:javascript.express.security.audit.xss"]
+        is RiskLevel.MEDIUM
+    )
 
 
 def test_mixed_builtin_and_external_rules(tmp_path: Path) -> None:

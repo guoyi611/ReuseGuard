@@ -410,13 +410,9 @@ def score_idea_similarity(
 
     # Separate name/topics tokens from description tokens to distinguish
     # precise matches from README-body noise.
-    name_topics = " ".join(
-        [candidate.full_name, " ".join(candidate.topics)]
-    ).lower()
+    name_topics = " ".join([candidate.full_name, " ".join(candidate.topics)]).lower()
     name_topics_tokens = set(re.findall(r"[a-z0-9+#.-]+", name_topics))
-    description_tokens = set(
-        re.findall(r"[a-z0-9+#.-]+", (candidate.description or "").lower())
-    )
+    description_tokens = set(re.findall(r"[a-z0-9+#.-]+", (candidate.description or "").lower()))
 
     if keywords:
         weighted_hits = 0.0

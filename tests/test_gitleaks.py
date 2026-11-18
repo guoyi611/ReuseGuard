@@ -483,7 +483,7 @@ def test_user_config_already_extending_is_left_alone(tmp_path: Path) -> None:
     root = _root(tmp_path)
     user_cfg = tmp_path / "team-rules.toml"
     user_cfg.write_text(
-        "[extend]\nuseDefault = true\n[[rules]]\nid = \"x\"\n",
+        '[extend]\nuseDefault = true\n[[rules]]\nid = "x"\n',
         encoding="utf-8",
     )
     runner = _Runner(_payload())

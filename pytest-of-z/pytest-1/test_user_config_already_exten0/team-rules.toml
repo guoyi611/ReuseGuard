@@ -1,0 +1,4 @@
+[extend]
+useDefault = true
+[[rules]]
+id = "x"

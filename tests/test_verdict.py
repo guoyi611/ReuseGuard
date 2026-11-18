@@ -173,5 +173,6 @@ def test_decide_omits_license_limitation_when_declared() -> None:
 
     verdict = decide(repo, _filter(), _scan())
 
-    assert not any("license" in item.lower() and "unconfirmed" in item.lower()
-                   for item in verdict.limitations)
+    assert not any(
+        "license" in item.lower() and "unconfirmed" in item.lower() for item in verdict.limitations
+    )

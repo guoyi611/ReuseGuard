@@ -404,8 +404,7 @@ def _to_finding(
     ecosystem = f" ({advisory.ecosystem})" if advisory.ecosystem else ""
     cvss_tail = f" · {advisory.cvss_label}" if advisory.cvss_label else ""
     evidence = (
-        f"{'; '.join(packages[:3])}{ecosystem}{cvss_tail} · "
-        f"https://osv.dev/vulnerability/{primary}"
+        f"{'; '.join(packages[:3])}{ecosystem}{cvss_tail} · https://osv.dev/vulnerability/{primary}"
     )[:_MAX_EVIDENCE]
     if advisory.cvss_label:
         sev_tag = advisory.advisory_severity_label or advisory.severity.value.upper()

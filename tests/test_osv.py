@@ -588,7 +588,10 @@ def test_npm_optional_dependency_counts_as_development(tmp_path: Path) -> None:
 def test_mixed_prod_and_dev_packages_mark_advisory_as_production(tmp_path: Path) -> None:
     """If any affected package is prod, the advisory stays production-scoped."""
     root = _root(tmp_path)
-    packages = [_package_entry(name="prod-pkg", dev=False), _package_entry(name="dev-pkg", dev=True)]
+    packages = [
+        _package_entry(name="prod-pkg", dev=False),
+        _package_entry(name="dev-pkg", dev=True),
+    ]
     results = [_result(packages=packages)]
     report = _scanner(_Runner(_payload(results))).scan(root)
 
@@ -617,9 +620,7 @@ def test_unknown_ecosystem_scope_is_none(tmp_path: Path) -> None:
     root = tmp_path / "cargo-tree"
     root.mkdir()
     (root / "Cargo.lock").write_text("", encoding="utf-8")
-    results = [
-        _result(path="Cargo.lock", packages=[_package_entry(ecosystem="crates.io")])
-    ]
+    results = [_result(path="Cargo.lock", packages=[_package_entry(ecosystem="crates.io")])]
     report = _scanner(_Runner(_payload(results))).scan(root)
 
     assert report.findings[0].scope is None
@@ -658,7 +659,9 @@ def test_cvss_score_is_shown_alongside_advisory_severity(tmp_path: Path) -> None
 def test_cvss_vector_only_is_rendered_when_score_missing(tmp_path: Path) -> None:
     root = _root(tmp_path)
     vector = "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
-    results = [_result(packages=[_package(vulnerabilities=[_vuln_with_cvss(score=None, vector=vector)])])]
+    results = [
+        _result(packages=[_package(vulnerabilities=[_vuln_with_cvss(score=None, vector=vector)])])
+    ]
     report = _scanner(_Runner(_payload(results))).scan(root)
 
     finding = report.findings[0]

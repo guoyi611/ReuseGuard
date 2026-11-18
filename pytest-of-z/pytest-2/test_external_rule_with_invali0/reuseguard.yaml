@@ -1,2 +1,0 @@
-rules:
-  severity: {gitleaks:aws-access-token: severe}

@@ -1,3 +1,0 @@
-# Demo
-
-A small client.

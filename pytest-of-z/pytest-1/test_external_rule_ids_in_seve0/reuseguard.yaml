@@ -1,6 +1,0 @@
-
-rules:
-  severity:
-    gitleaks:private-key: high
-    osv:CVE-2024-12345: critical
-    semgrep:javascript.express.security.audit.xss: medium

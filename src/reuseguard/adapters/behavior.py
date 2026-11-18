@@ -158,6 +158,72 @@ def normalize_image_reference(reference: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cross-cutting request rules (design section 12.1)
+# ---------------------------------------------------------------------------
+
+
+def behavior_requested(mode: str | BehaviorMode) -> bool:
+    """True when anything other than ``off`` (including a bare flag) was asked for."""
+    return _as_mode(mode) is not BehaviorMode.OFF
+
+
+def resolve_behavior_mode(
+    requested: str | BehaviorMode,
+    *,
+    scan_enabled: bool,
+    image: str | None,
+    settings_supplied: bool,
+) -> BehaviorMode:
+    """Validate one behavior request before anything is planned.
+
+    The rules come from design section 12.1 and exist so a user can never end up
+    believing code ran (or will run) when it did not:
+
+    - a behavior run needs a snapshot, so it is mutually exclusive with
+      ``--no-scan``;
+    - turning it on always requires an explicit digest-pinned image;
+    - per-run knobs and the image on their own are a usage error, not a
+      silent no-op;
+    - nothing here looks at the sandbox mode: ``--sandbox auto`` never enables
+      behavior probing, because that would automate executing untrusted code.
+    """
+    mode = _as_mode(requested)
+    if mode is BehaviorMode.OFF:
+        if image is not None:
+            raise BehaviorConfigError(
+                "--behavior-image requires --behavior; the image alone does not enable "
+                "a behavior run"
+            )
+        if settings_supplied:
+            raise BehaviorConfigError(
+                "--behavior-* options require --behavior; they do not enable a run on their own"
+            )
+        return mode
+
+    if not scan_enabled:
+        raise BehaviorConfigError(
+            "behavior probing needs a snapshot, so it cannot be combined with --no-scan "
+            "or features.scan: false"
+        )
+    if image is None:
+        raise BehaviorConfigError(
+            "--behavior requires --behavior-image IMAGE@sha256:<digest>; ReuseGuard never "
+            "picks an image or pulls one for you"
+        )
+    validate_image_reference(image)
+    return mode
+
+
+def _as_mode(value: str | BehaviorMode) -> BehaviorMode:
+    if isinstance(value, BehaviorMode):
+        return value
+    try:
+        return BehaviorMode(value)
+    except ValueError as exc:
+        raise BehaviorConfigError(f"invalid behavior mode {value!r}") from exc
+
+
+# ---------------------------------------------------------------------------
 # Planning objects
 # ---------------------------------------------------------------------------
 

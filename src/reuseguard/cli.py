@@ -7,12 +7,48 @@ import contextlib
 import logging
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from . import __version__
+from .adapters.behavior import (
+    DEFAULT_CPUS as DEFAULT_BEHAVIOR_CPUS,
+)
+from .adapters.behavior import (
+    DEFAULT_MAX_WORK_FILES as DEFAULT_BEHAVIOR_MAX_WORK_FILES,
+)
+from .adapters.behavior import (
+    DEFAULT_MAX_WORK_MB as DEFAULT_BEHAVIOR_MAX_WORK_MB,
+)
+from .adapters.behavior import (
+    DEFAULT_MEMORY_MB as DEFAULT_BEHAVIOR_MEMORY_MB,
+)
+from .adapters.behavior import (
+    DEFAULT_PHASE_TIMEOUT_SECONDS as DEFAULT_BEHAVIOR_PHASE_TIMEOUT,
+)
+from .adapters.behavior import (
+    DEFAULT_PIDS as DEFAULT_BEHAVIOR_PIDS,
+)
+from .adapters.behavior import (
+    DEFAULT_TOTAL_TIMEOUT_SECONDS as DEFAULT_BEHAVIOR_TIMEOUT,
+)
+from .adapters.behavior import (
+    BehaviorConfigError,
+    BehaviorLimits,
+    BehaviorOptions,
+    behavior_requested,
+    resolve_behavior_mode,
+)
+from .adapters.behavior import validate_cpus as _validate_behavior_cpus
+from .adapters.behavior import validate_max_work_files as _validate_behavior_max_work_files
+from .adapters.behavior import validate_max_work_mb as _validate_behavior_max_work_mb
+from .adapters.behavior import validate_memory_mb as _validate_behavior_memory_mb
+from .adapters.behavior import validate_phase_timeout as _validate_behavior_phase_timeout
+from .adapters.behavior import validate_pids as _validate_behavior_pids
+from .adapters.behavior import validate_total_timeout as _validate_behavior_timeout
 from .adapters.github import GitHubClient, GitHubError, GitHubNotFound, GitHubRateLimit
 from .adapters.sandbox import (
     DEFAULT_IMAGE,
@@ -23,11 +59,15 @@ from .adapters.sandbox import (
 from .adapters.scorecard import ScorecardClient
 from .config import ConfigError, Policy, Settings, load_policy, resolve_github_token
 from .demo import build_demo_report
-from .models import RepoRef, Report
+from .models import BehaviorMode, RepoRef, Report
 from .pipeline import Pipeline
 from .report import render
 
 logger = logging.getLogger("reuseguard")
+
+
+class _UsageError(Exception):
+    """A rejected request whose message was already printed; exit status 2."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -217,6 +257,82 @@ def build_parser() -> argparse.ArgumentParser:
         help="wall-clock limit for one sandbox run, 1-600 (default: 20)",
     )
     check.add_argument(
+        "--behavior",
+        nargs="?",
+        const="all",
+        choices=("off", "import", "test", "all"),
+        default=None,
+        metavar="{off,import,test,all}",
+        help=(
+            "opt in to the behavior probe, which executes repository code in a "
+            "disposable container: 'import' or 'test' runs one phase, 'all' or the "
+            "bare flag runs both, 'off' disables it (default: off). Never enabled "
+            "by --sandbox; requires --behavior-image"
+        ),
+    )
+    check.add_argument(
+        "--behavior-image",
+        metavar="IMAGE@sha256:...",
+        help=(
+            "image for the behavior probe; must be pinned by digest and already "
+            "present locally (ReuseGuard never pulls)"
+        ),
+    )
+    check.add_argument(
+        "--behavior-timeout",
+        type=_behavior_timeout,
+        default=None,
+        metavar="SECONDS",
+        help="total budget for one behavior run, 30-1800 (default: 300)",
+    )
+    check.add_argument(
+        "--behavior-phase-timeout",
+        type=_behavior_phase_timeout,
+        default=None,
+        metavar="SECONDS",
+        help="budget for a single behavior phase, 10-900 (default: 120)",
+    )
+    check.add_argument(
+        "--behavior-memory-mb",
+        type=_behavior_memory_mb,
+        default=None,
+        metavar="MB",
+        help="container memory limit for a behavior phase, 128-4096 (default: 512)",
+    )
+    check.add_argument(
+        "--behavior-cpus",
+        type=_behavior_cpus,
+        default=None,
+        metavar="N",
+        help="CPU limit for a behavior phase, 0.1-4.0 (default: 1.0)",
+    )
+    check.add_argument(
+        "--behavior-pids",
+        type=_behavior_pids,
+        default=None,
+        metavar="N",
+        help="PID limit for a behavior phase, 16-512 (default: 128)",
+    )
+    check.add_argument(
+        "--behavior-max-work-mb",
+        type=_behavior_max_work_mb,
+        default=None,
+        metavar="MB",
+        help="maximum size of the behavior work directory, 64-4096 (default: 512)",
+    )
+    check.add_argument(
+        "--behavior-max-work-files",
+        type=_behavior_max_work_files,
+        default=None,
+        metavar="N",
+        help="maximum file count of the behavior work directory, 1000-200000 (default: 50000)",
+    )
+    check.add_argument(
+        "--behavior-keep-workdir",
+        action="store_true",
+        help="keep the behavior work directory for inspection; containers are still removed",
+    )
+    check.add_argument(
         "--no-gh-token",
         action="store_true",
         help="do not read a token from the gh CLI (environment variables still apply)",
@@ -377,6 +493,11 @@ def _run_check(args: argparse.Namespace) -> int:
             "or set features.scan: true",
             file=sys.stderr,
         )
+        return 2
+
+    try:
+        behavior_limits, behavior_keep_workdir = _behavior_settings(args, enable_scan=enable_scan)
+    except _UsageError:
         return 2
 
     semgrep_timeout = _pick(args.semgrep_timeout, None, 300.0)
@@ -544,6 +665,16 @@ def _run_check(args: argparse.Namespace) -> int:
         sandbox_mode=sandbox_mode,
         sandbox_image=sandbox_limits.image,
         sandbox_timeout=sandbox_limits.timeout_seconds,
+        behavior_mode=behavior_limits.mode,
+        behavior_image=behavior_limits.image,
+        behavior_timeout=behavior_limits.limits.total_timeout_seconds,
+        behavior_phase_timeout=behavior_limits.limits.phase_timeout_seconds,
+        behavior_memory_mb=behavior_limits.limits.memory_mb,
+        behavior_cpus=behavior_limits.limits.cpus,
+        behavior_pids=behavior_limits.limits.pids,
+        behavior_max_work_mb=behavior_limits.limits.max_work_mb,
+        behavior_max_work_files=behavior_limits.limits.max_work_files,
+        keep_behavior_workdir=behavior_keep_workdir,
         keep_workdir=args.keep_workdir,
         disabled_rules=policy.disabled_rules,
         severity_overrides=policy.severity_overrides,
@@ -586,6 +717,75 @@ def _run_check(args: argparse.Namespace) -> int:
 
     _emit(report, args.format, args.output)
     return _exit_code(report, args.fail_on)
+
+
+def _behavior_settings(args: argparse.Namespace, *, enable_scan: bool) -> tuple[Any, bool]:
+    """Build the validated behavior request, or the "off" default.
+
+    Validation is delegated to :mod:`reuseguard.adapters.behavior` so the CLI and
+    the YAML loader share one set of rules. Nothing here plans or runs Docker.
+    A rejected request returns the usage-error exit code (2) from ``_run_check``.
+    """
+    try:
+        mode = resolve_behavior_mode(
+            args.behavior or "off",
+            scan_enabled=enable_scan,
+            image=args.behavior_image,
+            settings_supplied=_behavior_settings_supplied(args),
+        )
+        if not behavior_requested(mode):
+            # Returning early is also the guarantee that a bare run never
+            # reaches anything that could start a container.
+            return _OffBehaviorRequest(BehaviorLimits()), False
+        limits = BehaviorLimits(
+            total_timeout_seconds=_pick(args.behavior_timeout, None, DEFAULT_BEHAVIOR_TIMEOUT),
+            phase_timeout_seconds=_pick(
+                args.behavior_phase_timeout, None, DEFAULT_BEHAVIOR_PHASE_TIMEOUT
+            ),
+            memory_mb=_pick(args.behavior_memory_mb, None, DEFAULT_BEHAVIOR_MEMORY_MB),
+            cpus=_pick(args.behavior_cpus, None, DEFAULT_BEHAVIOR_CPUS),
+            pids=_pick(args.behavior_pids, None, DEFAULT_BEHAVIOR_PIDS),
+            max_work_mb=_pick(args.behavior_max_work_mb, None, DEFAULT_BEHAVIOR_MAX_WORK_MB),
+            max_work_files=_pick(
+                args.behavior_max_work_files, None, DEFAULT_BEHAVIOR_MAX_WORK_FILES
+            ),
+        )
+        options = BehaviorOptions(
+            mode=mode,
+            image=args.behavior_image,
+            limits=limits,
+            keep_workdir=args.behavior_keep_workdir,
+        )
+    except BehaviorConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise _UsageError from exc
+    return options, options.keep_workdir
+
+
+@dataclass(frozen=True)
+class _OffBehaviorRequest:
+    """The "behavior not requested" result: mode off, no image, default limits."""
+
+    limits: BehaviorLimits
+    image: None = None
+    mode: BehaviorMode = BehaviorMode.OFF
+    keep_workdir: bool = False
+
+
+def _behavior_settings_supplied(args: argparse.Namespace) -> bool:
+    """True when any non-enabling behavior knob was used without --behavior."""
+    return any(
+        (
+            args.behavior_timeout is not None,
+            args.behavior_phase_timeout is not None,
+            args.behavior_memory_mb is not None,
+            args.behavior_cpus is not None,
+            args.behavior_pids is not None,
+            args.behavior_max_work_mb is not None,
+            args.behavior_max_work_files is not None,
+            args.behavior_keep_workdir,
+        )
+    )
 
 
 def _emit(report: Report, fmt: str, output: str | None) -> None:
@@ -703,3 +903,39 @@ def _osv_timeout(value: str) -> float:
     if not 10.0 <= parsed <= 3600.0:
         raise argparse.ArgumentTypeError("osv-scanner timeout must be between 10 and 3600 seconds")
     return parsed
+
+
+def _behavior_timeout(value: str) -> float:
+    return _behavior_value(_validate_behavior_timeout, _non_negative_float(value))
+
+
+def _behavior_phase_timeout(value: str) -> float:
+    return _behavior_value(_validate_behavior_phase_timeout, _non_negative_float(value))
+
+
+def _behavior_memory_mb(value: str) -> int:
+    return _behavior_value(_validate_behavior_memory_mb, _non_negative_int(value))
+
+
+def _behavior_cpus(value: str) -> float:
+    return _behavior_value(_validate_behavior_cpus, _non_negative_float(value))
+
+
+def _behavior_pids(value: str) -> int:
+    return _behavior_value(_validate_behavior_pids, _non_negative_int(value))
+
+
+def _behavior_max_work_mb(value: str) -> int:
+    return _behavior_value(_validate_behavior_max_work_mb, _non_negative_int(value))
+
+
+def _behavior_max_work_files(value: str) -> int:
+    return _behavior_value(_validate_behavior_max_work_files, _non_negative_int(value))
+
+
+def _behavior_value(validate, parsed: int | float) -> int | float:
+    """Run a shared behavior validator and translate its message for argparse."""
+    try:
+        return validate(parsed)
+    except BehaviorConfigError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc

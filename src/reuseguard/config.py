@@ -13,6 +13,27 @@ from typing import Any
 import yaml
 
 from . import __version__
+from .adapters.behavior import (
+    DEFAULT_CPUS as DEFAULT_BEHAVIOR_CPUS,
+)
+from .adapters.behavior import (
+    DEFAULT_MAX_WORK_FILES as DEFAULT_BEHAVIOR_MAX_WORK_FILES,
+)
+from .adapters.behavior import (
+    DEFAULT_MAX_WORK_MB as DEFAULT_BEHAVIOR_MAX_WORK_MB,
+)
+from .adapters.behavior import (
+    DEFAULT_MEMORY_MB as DEFAULT_BEHAVIOR_MEMORY_MB,
+)
+from .adapters.behavior import (
+    DEFAULT_PHASE_TIMEOUT_SECONDS as DEFAULT_BEHAVIOR_PHASE_TIMEOUT_SECONDS,
+)
+from .adapters.behavior import (
+    DEFAULT_PIDS as DEFAULT_BEHAVIOR_PIDS,
+)
+from .adapters.behavior import (
+    DEFAULT_TOTAL_TIMEOUT_SECONDS as DEFAULT_BEHAVIOR_TOTAL_TIMEOUT_SECONDS,
+)
 from .adapters.sandbox import (
     DEFAULT_CPUS,
     DEFAULT_IMAGE,
@@ -22,9 +43,11 @@ from .adapters.sandbox import (
     SANDBOX_MODES,
 )
 from .adapters.scanner import KNOWN_RULE_IDS
-from .models import RiskLevel
+from .models import BehaviorMode, RiskLevel
 
 DEFAULT_USER_AGENT = f"reuseguard/{__version__}"
+
+BEHAVIOR_MODE_OFF = BehaviorMode.OFF.value
 
 _POLICY_VERSION = 1
 _TOP_LEVEL_KEYS = {"version", "thresholds", "limits", "features", "rules", "suppress"}
@@ -211,6 +234,19 @@ class Settings:
     sandbox_memory_mb: int = DEFAULT_MEMORY_MB
     sandbox_cpus: float = DEFAULT_CPUS
     sandbox_pids_limit: int = DEFAULT_PIDS_LIMIT
+    # Behavior probe (M4). Off unless the user explicitly asked for it; the
+    # defaults mirror the documented CLI defaults. No Docker command reads these
+    # yet: steps 2+ of docs/m4-behavior-probe.md do that.
+    behavior_mode: str = BEHAVIOR_MODE_OFF
+    behavior_image: str | None = None
+    behavior_timeout: float = DEFAULT_BEHAVIOR_TOTAL_TIMEOUT_SECONDS
+    behavior_phase_timeout: float = DEFAULT_BEHAVIOR_PHASE_TIMEOUT_SECONDS
+    behavior_memory_mb: int = DEFAULT_BEHAVIOR_MEMORY_MB
+    behavior_cpus: float = DEFAULT_BEHAVIOR_CPUS
+    behavior_pids: int = DEFAULT_BEHAVIOR_PIDS
+    behavior_max_work_mb: int = DEFAULT_BEHAVIOR_MAX_WORK_MB
+    behavior_max_work_files: int = DEFAULT_BEHAVIOR_MAX_WORK_FILES
+    keep_behavior_workdir: bool = False
     keep_workdir: bool = False
     disabled_rules: frozenset[str] = frozenset()
     severity_overrides: dict[str, RiskLevel] = field(default_factory=dict)

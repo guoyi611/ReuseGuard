@@ -685,3 +685,221 @@ def test_osv_offline_is_forwarded_to_the_pipeline(
     assert settings.osv_offline_db == str(db)
     # offline implies no-resolve; the CLI should keep the default True.
     assert settings.osv_no_resolve is True
+
+
+# ---------------------------------------------------------------------------
+# Behavior probe (M4): flags, cross-validation, and forwarding.
+# No Docker command is executed anywhere below.
+# ---------------------------------------------------------------------------
+
+_PINNED_IMAGE = "python@sha256:" + "0123456789abcdef" * 4
+
+
+def _capture_settings(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    class _CapturingPipeline:
+        def __init__(self, settings, *_args, **_kwargs) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturingPipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+    return captured
+
+
+def test_behavior_flag_parsing() -> None:
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["check", "acme/seed"]).behavior is None
+    assert parser.parse_args(["check", "acme/seed", "--behavior"]).behavior == "all"
+    assert parser.parse_args(["check", "acme/seed", "--behavior", "import"]).behavior == "import"
+    assert parser.parse_args(["check", "acme/seed", "--behavior", "test"]).behavior == "test"
+    assert parser.parse_args(["check", "acme/seed", "--behavior", "all"]).behavior == "all"
+    assert parser.parse_args(["check", "acme/seed", "--behavior", "off"]).behavior == "off"
+
+
+def test_behavior_rejects_unknown_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["check", "acme/seed", "--behavior", "install"])
+
+    assert excinfo.value.code == 2
+    assert "install" in capsys.readouterr().err
+
+
+def test_behavior_requires_an_image(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["check", "acme/seed", "--behavior"]) == 2
+
+    err = capsys.readouterr().err
+    assert "--behavior-image" in err and "sha256" in err
+
+
+def test_behavior_rejects_a_tagged_image(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--behavior", "--behavior-image", "python:3.12-slim"])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "pinned by digest" in err
+    assert "tags are refused because they can move" in err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--behavior-image", _PINNED_IMAGE],
+        ["--behavior-timeout", "120"],
+        ["--behavior-keep-workdir"],
+    ],
+)
+def test_behavior_options_alone_do_not_enable_a_run(
+    capsys: pytest.CaptureFixture[str], extra: list[str]
+) -> None:
+    assert cli.main(["check", "acme/seed", *extra]) == 2
+
+    err = capsys.readouterr().err
+    assert "requires --behavior" in err or "require --behavior" in err
+
+
+def test_behavior_off_with_image_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["check", "acme/seed", "--behavior", "off", "--behavior-image", _PINNED_IMAGE])
+
+    assert code == 2
+    assert "--behavior-image requires --behavior" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--behavior-timeout", "29"),
+        ("--behavior-timeout", "1801"),
+        ("--behavior-phase-timeout", "9"),
+        ("--behavior-phase-timeout", "901"),
+        ("--behavior-memory-mb", "127"),
+        ("--behavior-memory-mb", "4097"),
+        ("--behavior-cpus", "0.05"),
+        ("--behavior-cpus", "4.1"),
+        ("--behavior-pids", "15"),
+        ("--behavior-pids", "513"),
+        ("--behavior-max-work-mb", "63"),
+        ("--behavior-max-work-mb", "4097"),
+        ("--behavior-max-work-files", "999"),
+        ("--behavior-max-work-files", "200001"),
+    ],
+)
+def test_behavior_limits_are_range_checked(flag: str, value: str) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            ["check", "acme/seed", "--behavior", "--behavior-image", _PINNED_IMAGE, flag, value]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_behavior_cannot_be_combined_with_no_scan(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(
+        ["check", "acme/seed", "--behavior", "--behavior-image", _PINNED_IMAGE, "--no-scan"]
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--no-scan" in err
+
+
+def test_behavior_is_not_enabled_by_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_settings(monkeypatch)
+
+    code = cli.main(["check", "acme/seed", "--sandbox", "auto", "--quiet"])
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.sandbox_mode == "auto"
+    assert settings.behavior_mode == "off"
+    assert settings.behavior_image is None
+
+
+def test_behavior_defaults_are_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_settings(monkeypatch)
+
+    code = cli.main(
+        ["check", "acme/seed", "--behavior", "--behavior-image", _PINNED_IMAGE, "--quiet"]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.behavior_mode == "all"
+    assert settings.behavior_image == _PINNED_IMAGE
+    assert settings.behavior_timeout == 300.0
+    assert settings.behavior_phase_timeout == 120.0
+    assert settings.behavior_memory_mb == 512
+    assert settings.behavior_cpus == 1.0
+    assert settings.behavior_pids == 128
+    assert settings.behavior_max_work_mb == 512
+    assert settings.behavior_max_work_files == 50000
+    assert settings.keep_behavior_workdir is False
+
+
+def test_behavior_values_are_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_settings(monkeypatch)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--behavior",
+            "test",
+            "--behavior-image",
+            _PINNED_IMAGE,
+            "--behavior-timeout",
+            "600",
+            "--behavior-phase-timeout",
+            "240",
+            "--behavior-memory-mb",
+            "1024",
+            "--behavior-cpus",
+            "2.5",
+            "--behavior-pids",
+            "256",
+            "--behavior-max-work-mb",
+            "1024",
+            "--behavior-max-work-files",
+            "10000",
+            "--behavior-keep-workdir",
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.behavior_mode == "test"
+    assert settings.behavior_timeout == 600.0
+    assert settings.behavior_phase_timeout == 240.0
+    assert settings.behavior_memory_mb == 1024
+    assert settings.behavior_cpus == 2.5
+    assert settings.behavior_pids == 256
+    assert settings.behavior_max_work_mb == 1024
+    assert settings.behavior_max_work_files == 10000
+    assert settings.keep_behavior_workdir is True
+
+
+def test_behavior_settings_are_public_but_do_not_leak_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_settings(monkeypatch)
+
+    code = cli.main(
+        ["check", "acme/seed", "--behavior", "import", "--behavior-image", _PINNED_IMAGE, "--quiet"]
+    )
+
+    assert code == 0
+    public = captured["settings"].public_dict()
+    assert public["behavior_mode"] == "import"
+    assert public["behavior_image"] == _PINNED_IMAGE
+    assert public["behavior_timeout"] == 300.0
+    assert "token" not in public
+    assert public["token_configured"] is False

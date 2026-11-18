@@ -70,40 +70,44 @@ class BehaviorConfigError(Exception):
 
 
 def validate_total_timeout(value: float) -> float:
-    return _bounded_float(
-        value, "behavior timeout", MIN_TOTAL_TIMEOUT_SECONDS, MAX_TOTAL_TIMEOUT_SECONDS
+    return behavior_number(
+        value, MIN_TOTAL_TIMEOUT_SECONDS, MAX_TOTAL_TIMEOUT_SECONDS, "behavior timeout"
     )
 
 
 def validate_phase_timeout(value: float) -> float:
-    return _bounded_float(
-        value, "behavior phase timeout", MIN_PHASE_TIMEOUT_SECONDS, MAX_PHASE_TIMEOUT_SECONDS
+    return behavior_number(
+        value,
+        MIN_PHASE_TIMEOUT_SECONDS,
+        MAX_PHASE_TIMEOUT_SECONDS,
+        "behavior phase timeout",
     )
 
 
 def validate_memory_mb(value: int) -> int:
-    return _bounded_int(value, "behavior memory", MIN_MEMORY_MB, MAX_MEMORY_MB)
+    return behavior_int(value, MIN_MEMORY_MB, MAX_MEMORY_MB, "behavior memory")
 
 
 def validate_cpus(value: float) -> float:
-    return _bounded_float(value, "behavior CPUs", MIN_CPUS, MAX_CPUS)
+    return behavior_number(value, MIN_CPUS, MAX_CPUS, "behavior CPUs")
 
 
 def validate_pids(value: int) -> int:
-    return _bounded_int(value, "behavior PID limit", MIN_PIDS, MAX_PIDS)
+    return behavior_int(value, MIN_PIDS, MAX_PIDS, "behavior PID limit")
 
 
 def validate_max_work_mb(value: int) -> int:
-    return _bounded_int(value, "behavior work-dir size limit", MIN_MAX_WORK_MB, MAX_MAX_WORK_MB)
+    return behavior_int(value, MIN_MAX_WORK_MB, MAX_MAX_WORK_MB, "behavior work-dir size limit")
 
 
 def validate_max_work_files(value: int) -> int:
-    return _bounded_int(
-        value, "behavior work-dir file limit", MIN_MAX_WORK_FILES, MAX_MAX_WORK_FILES
+    return behavior_int(
+        value, MIN_MAX_WORK_FILES, MAX_MAX_WORK_FILES, "behavior work-dir file limit"
     )
 
 
-def _bounded_int(value: int, label: str, minimum: int, maximum: int) -> int:
+def behavior_int(value: int, minimum: int, maximum: int, label: str) -> int:
+    """Validate an integer bound; shared by the CLI, YAML loader, and tests."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise BehaviorConfigError(f"{label} must be an integer")
     if not minimum <= value <= maximum:
@@ -111,7 +115,8 @@ def _bounded_int(value: int, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def _bounded_float(value: float, label: str, minimum: float, maximum: float) -> float:
+def behavior_number(value: float, minimum: float, maximum: float, label: str) -> float:
+    """Validate a numeric bound (used for both seconds and CPU shares)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise BehaviorConfigError(f"{label} must be a number")
     if not math.isfinite(value):
@@ -157,6 +162,11 @@ def normalize_image_reference(reference: str) -> str:
     return validate_image_reference(reference).lower()
 
 
+def behavior_image(reference: str) -> str:
+    """Validate a digest-pinned image reference (short alias used by config)."""
+    return validate_image_reference(reference)
+
+
 # ---------------------------------------------------------------------------
 # Cross-cutting request rules (design section 12.1)
 # ---------------------------------------------------------------------------
@@ -173,6 +183,7 @@ def resolve_behavior_mode(
     scan_enabled: bool,
     image: str | None,
     settings_supplied: bool,
+    image_from_cli: bool = True,
 ) -> BehaviorMode:
     """Validate one behavior request before anything is planned.
 
@@ -183,13 +194,14 @@ def resolve_behavior_mode(
       ``--no-scan``;
     - turning it on always requires an explicit digest-pinned image;
     - per-run knobs and the image on their own are a usage error, not a
-      silent no-op;
+      silent no-op. ``image_from_cli=False`` means the image came from the YAML
+      policy, which may pin it for later use without enabling anything;
     - nothing here looks at the sandbox mode: ``--sandbox auto`` never enables
       behavior probing, because that would automate executing untrusted code.
     """
     mode = _as_mode(requested)
     if mode is BehaviorMode.OFF:
-        if image is not None:
+        if image is not None and image_from_cli:
             raise BehaviorConfigError(
                 "--behavior-image requires --behavior; the image alone does not enable "
                 "a behavior run"

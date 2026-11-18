@@ -34,6 +34,26 @@ from .adapters.behavior import (
 from .adapters.behavior import (
     DEFAULT_TOTAL_TIMEOUT_SECONDS as DEFAULT_BEHAVIOR_TOTAL_TIMEOUT_SECONDS,
 )
+from .adapters.behavior import (
+    MAX_CPUS,
+    MAX_MAX_WORK_FILES,
+    MAX_MAX_WORK_MB,
+    MAX_MEMORY_MB,
+    MAX_PHASE_TIMEOUT_SECONDS,
+    MAX_PIDS,
+    MAX_TOTAL_TIMEOUT_SECONDS,
+    MIN_CPUS,
+    MIN_MAX_WORK_FILES,
+    MIN_MAX_WORK_MB,
+    MIN_MEMORY_MB,
+    MIN_PHASE_TIMEOUT_SECONDS,
+    MIN_PIDS,
+    MIN_TOTAL_TIMEOUT_SECONDS,
+    BehaviorConfigError,
+    behavior_image,
+    behavior_int,
+    behavior_number,
+)
 from .adapters.sandbox import (
     DEFAULT_CPUS,
     DEFAULT_IMAGE,
@@ -50,7 +70,7 @@ DEFAULT_USER_AGENT = f"reuseguard/{__version__}"
 BEHAVIOR_MODE_OFF = BehaviorMode.OFF.value
 
 _POLICY_VERSION = 1
-_TOP_LEVEL_KEYS = {"version", "thresholds", "limits", "features", "rules", "suppress"}
+_TOP_LEVEL_KEYS = {"version", "thresholds", "limits", "features", "rules", "suppress", "behavior"}
 
 # Known external scanner rule-ID prefixes. A rule ID like ``gitleaks:aws-access-token``
 # is accepted in ``rules.disable`` / ``rules.severity`` when its prefix matches one of
@@ -70,10 +90,66 @@ _LIMIT_KEYS = {
 _FEATURE_KEYS = {"recall", "scorecard", "scan"}
 _RULE_KEYS = {"disable", "severity"}
 _SUPPRESS_KEYS = {"paths"}
+_BEHAVIOR_KEYS = {
+    "image",
+    "timeout_seconds",
+    "phase_timeout_seconds",
+    "memory_mb",
+    "cpus",
+    "pids",
+    "max_work_mb",
+    "max_work_files",
+}
+# Keys the behavior section does not own. They are called out by name so the
+# error explains *why* they are refused instead of looking like a typo report.
+_BEHAVIOR_FORBIDDEN_KEYS = {
+    "enabled": (
+        "executing repository code must stay an explicit command-line action; "
+        "remove behavior.enabled and pass --behavior on the command line"
+    ),
+    "mode": "behavior phases are selected with --behavior on the command line, not in YAML",
+    "keep_workdir": "behavior.keep_workdir is only available as --behavior-keep-workdir",
+    "keep_work_dir": "behavior.keep_work_dir is only available as --behavior-keep-workdir",
+}
 
 
 class ConfigError(Exception):
     """A policy file is unreadable, malformed, or uses unknown keys."""
+
+
+@dataclass(frozen=True)
+class PolicyBehavior:
+    """Behavior-probe overrides a policy file is allowed to set.
+
+    A policy may only tune the limits and pin the image. It can never turn the
+    probe on: that stays an explicit CLI decision because it executes
+    untrusted code.
+    """
+
+    image: str | None = None
+    timeout_seconds: float | None = None
+    phase_timeout_seconds: float | None = None
+    memory_mb: int | None = None
+    cpus: float | None = None
+    pids: int | None = None
+    max_work_mb: int | None = None
+    max_work_files: int | None = None
+
+    @property
+    def empty(self) -> bool:
+        return all(
+            getattr(self, name) is None
+            for name in (
+                "image",
+                "timeout_seconds",
+                "phase_timeout_seconds",
+                "memory_mb",
+                "cpus",
+                "pids",
+                "max_work_mb",
+                "max_work_files",
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -99,6 +175,7 @@ class Policy:
     disabled_rules: frozenset[str] = frozenset()
     severity_overrides: dict[str, RiskLevel] = field(default_factory=dict)
     suppress_paths: tuple[str, ...] = ()
+    behavior: PolicyBehavior = field(default_factory=PolicyBehavior)
 
 
 def load_policy(path: Path) -> Policy:
@@ -132,6 +209,7 @@ def load_policy(path: Path) -> Policy:
     features = _section(payload, "features", _FEATURE_KEYS)
     rules = _section(payload, "rules", _RULE_KEYS)
     suppress = _section(payload, "suppress", _SUPPRESS_KEYS)
+    behavior = _behavior_section(payload)
 
     disabled = _rule_ids(rules.get("disable", []), "rules.disable")
     overrides = _severity_overrides(rules.get("severity", {}))
@@ -167,7 +245,105 @@ def load_policy(path: Path) -> Policy:
         disabled_rules=disabled,
         severity_overrides=overrides,
         suppress_paths=_string_list(suppress.get("paths", []), "suppress.paths"),
+        behavior=behavior,
     )
+
+
+def _behavior_section(payload: dict[str, Any]) -> PolicyBehavior:
+    """Read the optional ``behavior`` section with its own key checks.
+
+    ``enabled`` / ``mode`` / ``keep_workdir`` are named explicitly so the error
+    says what the rule is, instead of reading like an ordinary typo report.
+    """
+    value = payload.get("behavior")
+    if value is None:
+        return PolicyBehavior()
+    if not isinstance(value, dict):
+        raise ConfigError("behavior must be a mapping")
+
+    forbidden = sorted(set(value) & set(_BEHAVIOR_FORBIDDEN_KEYS))
+    if forbidden:
+        details = "; ".join(f"behavior.{key}: {_BEHAVIOR_FORBIDDEN_KEYS[key]}" for key in forbidden)
+        raise ConfigError(details)
+    _reject_unknown(value, _BEHAVIOR_KEYS, "behavior")
+    return _behavior_policy(value)
+
+
+def _behavior_policy(section: dict[str, Any]) -> PolicyBehavior:
+    """Validate the optional ``behavior`` section.
+
+    A policy may only tune limits and pin the image. Enabling the probe stays an
+    explicit command-line decision because it executes untrusted code.
+    """
+    if not section:
+        return PolicyBehavior()
+    return PolicyBehavior(
+        image=_behavior_image(section.get("image")),
+        timeout_seconds=_behavior_value(
+            section.get("timeout_seconds"),
+            "behavior.timeout_seconds",
+            MIN_TOTAL_TIMEOUT_SECONDS,
+            MAX_TOTAL_TIMEOUT_SECONDS,
+            behavior_number,
+        ),
+        phase_timeout_seconds=_behavior_value(
+            section.get("phase_timeout_seconds"),
+            "behavior.phase_timeout_seconds",
+            MIN_PHASE_TIMEOUT_SECONDS,
+            MAX_PHASE_TIMEOUT_SECONDS,
+            behavior_number,
+        ),
+        memory_mb=_behavior_value(
+            section.get("memory_mb"),
+            "behavior.memory_mb",
+            MIN_MEMORY_MB,
+            MAX_MEMORY_MB,
+            behavior_int,
+        ),
+        cpus=_behavior_value(
+            section.get("cpus"), "behavior.cpus", MIN_CPUS, MAX_CPUS, behavior_number
+        ),
+        pids=_behavior_value(
+            section.get("pids"), "behavior.pids", MIN_PIDS, MAX_PIDS, behavior_int
+        ),
+        max_work_mb=_behavior_value(
+            section.get("max_work_mb"),
+            "behavior.max_work_mb",
+            MIN_MAX_WORK_MB,
+            MAX_MAX_WORK_MB,
+            behavior_int,
+        ),
+        max_work_files=_behavior_value(
+            section.get("max_work_files"),
+            "behavior.max_work_files",
+            MIN_MAX_WORK_FILES,
+            MAX_MAX_WORK_FILES,
+            behavior_int,
+        ),
+    )
+
+
+def _behavior_image(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError("behavior.image must be a string image reference")
+    try:
+        return behavior_image(value)
+    except BehaviorConfigError as exc:
+        raise ConfigError(f"behavior.image: {exc}") from exc
+
+
+def _behavior_value(value: Any, context: str, minimum, maximum, validate) -> Any:
+    """Run a shared behavior validator and re-raise it as a ConfigError."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{context} must be a number")
+    try:
+        return validate(value, minimum, maximum, context)
+    except BehaviorConfigError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def resolve_github_token(*, allow_gh_cli: bool = True) -> str | None:

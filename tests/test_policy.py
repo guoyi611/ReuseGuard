@@ -304,3 +304,213 @@ def test_merge_scan_reports_dedup_unaffected_by_external_ids(tmp_path: Path) -> 
     # Same (rule_id, path, line) should be deduplicated to one finding
     assert len(merged.findings) == 1
     assert merged.findings[0].rule_id == "gitleaks:aws-access-token"
+
+
+# ---------------------------------------------------------------------------
+# Behavior section (M4): limits may be tuned, the run may never be enabled.
+# ---------------------------------------------------------------------------
+
+_PINNED_IMAGE = "python@sha256:" + "0123456789abcdef" * 4
+
+
+def test_behavior_section_accepts_pinned_image_and_limits(tmp_path: Path) -> None:
+    path = _write_policy(
+        tmp_path,
+        f"""
+behavior:
+  image: "{_PINNED_IMAGE}"
+  timeout_seconds: 600
+  phase_timeout_seconds: 240
+  memory_mb: 1024
+  cpus: 2.5
+  pids: 256
+  max_work_mb: 1024
+  max_work_files: 10000
+""",
+    )
+
+    behavior = load_policy(path).behavior
+
+    assert behavior.image == _PINNED_IMAGE
+    assert behavior.timeout_seconds == 600.0
+    assert behavior.phase_timeout_seconds == 240.0
+    assert behavior.memory_mb == 1024
+    assert behavior.cpus == 2.5
+    assert behavior.pids == 256
+    assert behavior.max_work_mb == 1024
+    assert behavior.max_work_files == 10000
+    assert behavior.empty is False
+
+
+def test_behavior_section_is_absent_by_default(tmp_path: Path) -> None:
+    assert load_policy(_write_policy(tmp_path, "limits:\n  max_files: 10\n")).behavior.empty
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Enabling execution of untrusted code is never a policy decision.
+        "behavior:\n  enabled: true\n",
+        "behavior:\n  enabled: false\n",
+        "behavior:\n  mode: all\n",
+        "behavior:\n  keep_workdir: true\n",
+        "behavior:\n  keep_work_dir: true\n",
+        # Unknown keys are still typos, not silent no-ops.
+        "behavior:\n  timeout: 600\n",
+        "behavior:\n  image_sha: x\n",
+        # The image has to be pinned by digest, exactly like the CLI flag.
+        "behavior:\n  image: python:3.12-slim\n",
+        "behavior:\n  image: python\n",
+        "behavior:\n  image: 42\n",
+        # Bounds are the documented ones, not arbitrary.
+        "behavior:\n  timeout_seconds: 5\n",
+        "behavior:\n  timeout_seconds: 3600\n",
+        "behavior:\n  phase_timeout_seconds: 1\n",
+        "behavior:\n  memory_mb: 64\n",
+        "behavior:\n  cpus: 8\n",
+        "behavior:\n  pids: 4\n",
+        "behavior:\n  max_work_mb: 8192\n",
+        "behavior:\n  max_work_files: 10\n",
+        # Types must be explicit.
+        "behavior:\n  memory_mb: 512.5\n",
+        "behavior:\n  memory_mb: true\n",
+        "behavior:\n  timeout_seconds: fast\n",
+        "behavior: [1, 2]\n",
+        "behavior: enabled\n",
+    ],
+)
+def test_behavior_section_rejects_enabling_and_invalid_values(tmp_path: Path, text: str) -> None:
+    with pytest.raises(ConfigError):
+        load_policy(_write_policy(tmp_path, text))
+
+
+def test_behavior_enabled_error_explains_the_rule(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        load_policy(_write_policy(tmp_path, "behavior:\n  enabled: true\n"))
+
+    message = str(excinfo.value)
+    assert "behavior.enabled" in message
+    assert "--behavior" in message
+
+
+def test_cli_applies_behavior_policy_limits_and_keeps_flag_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_policy(
+        tmp_path,
+        f"""
+behavior:
+  image: "{_PINNED_IMAGE}"
+  timeout_seconds: 600
+  phase_timeout_seconds: 240
+  memory_mb: 1024
+  cpus: 2.5
+  max_work_files: 10000
+""",
+    )
+    captured: dict[str, Settings] = {}
+
+    class _CapturePipeline:
+        def __init__(self, settings, _github, _scorecard) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturePipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--config",
+            str(path),
+            # The policy pins the image, so the flag is optional here.
+            "--behavior",
+            "import",
+            "--behavior-memory-mb",
+            "2048",
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    settings = captured["settings"]
+    assert settings.behavior_mode == "import"
+    assert settings.behavior_image == _PINNED_IMAGE
+    assert settings.behavior_timeout == 600.0
+    assert settings.behavior_phase_timeout == 240.0
+    # Explicit CLI value wins over YAML.
+    assert settings.behavior_memory_mb == 2048
+    assert settings.behavior_cpus == 2.5
+    assert settings.behavior_max_work_files == 10000
+    # Unset in YAML and on the CLI: the built-in default still applies.
+    assert settings.behavior_pids == 128
+    assert settings.behavior_max_work_mb == 512
+
+
+def test_cli_behavior_image_flag_overrides_the_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = "ghcr.io/acme/runner@sha256:" + "fedcba9876543210" * 4
+    path = _write_policy(tmp_path, f'behavior:\n  image: "{_PINNED_IMAGE}"\n')
+    captured: dict[str, Settings] = {}
+
+    class _CapturePipeline:
+        def __init__(self, settings, _github, _scorecard) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturePipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    code = cli.main(
+        [
+            "check",
+            "acme/seed",
+            "--config",
+            str(path),
+            "--behavior",
+            "--behavior-image",
+            other,
+            "--quiet",
+        ]
+    )
+
+    assert code == 0
+    assert captured["settings"].behavior_image == other
+
+
+def test_behavior_policy_alone_does_not_enable_a_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_policy(
+        tmp_path,
+        f'behavior:\n  image: "{_PINNED_IMAGE}"\n  timeout_seconds: 600\n',
+    )
+    captured: dict[str, Settings] = {}
+
+    class _CapturePipeline:
+        def __init__(self, settings, _github, _scorecard) -> None:
+            captured["settings"] = settings
+
+        def run(self, _ref):
+            return build_demo_report()
+
+    monkeypatch.setattr(cli, "GitHubClient", _DummyClient)
+    monkeypatch.setattr(cli, "ScorecardClient", _DummyClient)
+    monkeypatch.setattr(cli, "Pipeline", _CapturePipeline)
+    monkeypatch.setattr(cli, "resolve_github_token", lambda **_kwargs: None)
+
+    assert cli.main(["check", "acme/seed", "--config", str(path), "--quiet"]) == 0
+
+    settings = captured["settings"]
+    assert settings.behavior_mode == "off"
+    assert settings.behavior_image is None

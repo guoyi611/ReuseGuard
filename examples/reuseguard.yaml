@@ -57,3 +57,19 @@ suppress:
   # paths:
   #   - "src/generated/**"
   #   - "migrations/*.py"
+
+# Behavior probe (M4). A policy may only tune limits and pin the image; it can
+# never enable the probe, because that executes untrusted repository code and
+# must stay an explicit command-line action (`--behavior`). Setting
+# `behavior.enabled`, `behavior.mode`, or `behavior.keep_workdir` is a hard
+# error, and `image` must be pinned by digest just like `--behavior-image`.
+#
+# behavior:
+#   image: "python@sha256:<64 hex characters>"
+#   timeout_seconds: 300          # 30-1800, total budget for one run
+#   phase_timeout_seconds: 120    # 10-900, budget for one phase
+#   memory_mb: 512                # 128-4096
+#   cpus: 1.0                     # 0.1-4.0
+#   pids: 128                     # 16-512
+#   max_work_mb: 512              # 64-4096
+#   max_work_files: 50000         # 1000-200000

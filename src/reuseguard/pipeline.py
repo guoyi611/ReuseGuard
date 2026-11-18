@@ -381,8 +381,16 @@ class Pipeline:
             # Secret scanning is additive: it never replaces the scanner above,
             # because secrets and install hooks are different evidence.
             try:
+                user_config = (
+                    Path(self.settings.gitleaks_config)
+                    if self.settings.gitleaks_config is not None
+                    else None
+                )
                 gitleaks = GitleaksScanner(
-                    GitleaksOptions(process_timeout=self.settings.gitleaks_timeout),
+                    GitleaksOptions(
+                        process_timeout=self.settings.gitleaks_timeout,
+                        user_config=user_config,
+                    ),
                     runner=self._gitleaks_runner,
                 )
                 scans.append(
@@ -419,8 +427,17 @@ class Pipeline:
             # Dependency scanning is additive as well: a vulnerable package and a
             # dangerous pattern are different evidence about the same snapshot.
             try:
+                offline_db = (
+                    Path(self.settings.osv_offline_db)
+                    if self.settings.osv_offline_db is not None
+                    else None
+                )
                 osv = OsvScanner(
-                    OsvOptions(process_timeout=self.settings.osv_timeout),
+                    OsvOptions(
+                        process_timeout=self.settings.osv_timeout,
+                        no_resolve=self.settings.osv_no_resolve,
+                        offline_db=offline_db,
+                    ),
                     runner=self._osv_runner,
                 )
                 osv_scan = osv.scan(

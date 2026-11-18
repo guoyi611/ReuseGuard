@@ -453,3 +453,61 @@ def test_missing_start_line_is_tolerated(tmp_path: Path) -> None:
 def test_options_reject_unsafe_values(kwargs: dict) -> None:
     with pytest.raises(GitleaksError):
         GitleaksOptions(**kwargs)
+
+
+def test_user_config_is_merged_with_use_default(tmp_path: Path) -> None:
+    """Custom rules are preserved but the built-in rule set cannot be disabled."""
+    root = _root(tmp_path)
+    user_cfg = tmp_path / "team-rules.toml"
+    user_cfg.write_text(
+        'title = "Team custom"\n[[rules]]\nid = "my-rule"\n',
+        encoding="utf-8",
+    )
+    runner = _Runner(_payload())
+    scanner = GitleaksScanner(
+        GitleaksOptions(process_timeout=30.0, user_config=user_cfg),
+        runner=runner,
+    )
+
+    scanner.scan(root)
+
+    assert runner.config is not None
+    assert "[[rules]]" in runner.config
+    assert 'id = "my-rule"' in runner.config
+    assert "[extend]" in runner.config
+    assert "useDefault = true" in runner.config
+
+
+def test_user_config_already_extending_is_left_alone(tmp_path: Path) -> None:
+    """If the team already wrote [extend] useDefault = true, do not duplicate it."""
+    root = _root(tmp_path)
+    user_cfg = tmp_path / "team-rules.toml"
+    user_cfg.write_text(
+        "[extend]\nuseDefault = true\n[[rules]]\nid = \"x\"\n",
+        encoding="utf-8",
+    )
+    runner = _Runner(_payload())
+    scanner = GitleaksScanner(
+        GitleaksOptions(process_timeout=30.0, user_config=user_cfg),
+        runner=runner,
+    )
+
+    scanner.scan(root)
+
+    # Exactly one [extend] block; the helper must not append a second one.
+    assert runner.config is not None
+    assert runner.config.count("[extend]") == 1
+    assert runner.config.count("useDefault = true") == 1
+
+
+def test_missing_user_config_raises_error(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.toml"
+    scanner = GitleaksScanner(
+        GitleaksOptions(process_timeout=30.0, user_config=missing),
+        runner=_Runner(_payload()),
+    )
+
+    report = scanner.scan(_root(tmp_path))
+
+    assert report.status is ScanStatus.ERROR
+    assert "could not read gitleaks config" in (report.error or "")

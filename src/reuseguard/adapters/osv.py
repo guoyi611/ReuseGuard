@@ -66,16 +66,31 @@ class OsvUnavailable(OsvError):
 
 @dataclass(frozen=True)
 class OsvOptions:
-    """How to invoke osv-scanner for one repository snapshot."""
+    """How to invoke osv-scanner for one repository snapshot.
+
+    ``no_resolve`` defaults to True so osv-scanner only trusts what the lockfile
+    already records; without it, incomplete manifests trigger registry lookups
+    that widen the network boundary silently. ``offline_db`` opts into fully
+    offline matching against a pre-downloaded OSV database; when set, the
+    adapter passes both ``--offline`` and ``--local-db`` and refuses to also
+    enable transitive resolution (there is no registry to resolve against).
+    """
 
     binary: str = DEFAULT_OSV_BINARY
     process_timeout: float = DEFAULT_PROCESS_TIMEOUT
+    no_resolve: bool = True
+    offline_db: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.binary.strip():
             raise OsvError("osv-scanner binary must not be empty")
         if not 10.0 <= self.process_timeout <= 3600.0:
             raise OsvError("osv-scanner process timeout must be between 10 and 3600 seconds")
+        if self.offline_db is not None and not self.no_resolve:
+            raise OsvError(
+                "--osv-offline cannot be combined with transitive resolution; "
+                "there is no registry to resolve against in offline mode"
+            )
 
 
 @dataclass
@@ -88,6 +103,9 @@ class _Advisory:
     severity: RiskLevel = RiskLevel.NONE
     ecosystem: str = ""
     packages: list[str] | None = None
+    scope: str | None = None
+    cvss_label: str | None = None
+    advisory_severity_label: str | None = None
 
     def __post_init__(self) -> None:
         if self.packages is None:
@@ -198,7 +216,7 @@ class OsvScanner:
         )
 
     def _build_argv(self, root: Path, report_path: Path) -> list[str]:
-        return [
+        argv = [
             self.options.binary,
             "scan",
             "source",
@@ -209,6 +227,11 @@ class OsvScanner:
             "--output-file",
             str(report_path),
         ]
+        if self.options.no_resolve:
+            argv.append("--no-resolve")
+        if self.options.offline_db is not None:
+            argv.extend(["--offline", "--local-db", str(self.options.offline_db)])
+        return argv
 
 
 def _collect_advisories(
@@ -244,6 +267,7 @@ def _collect_advisories(
                 continue
             label = f"{name}@{version}" if version else name
 
+            scope = _classify_scope(package, lockfile)
             entries = _package_advisories(entry)
             for ids, vulnerabilities in entries:
                 key = (lockfile, frozenset(ids))
@@ -261,11 +285,49 @@ def _collect_advisories(
                     severity = _severity(vulnerability)
                     if severity.rank > advisory.severity.rank:
                         advisory.severity = severity
+                    if advisory.cvss_label is None:
+                        advisory.cvss_label = _cvss_label(vulnerability)
+                    if advisory.advisory_severity_label is None:
+                        advisory.advisory_severity_label = _advisory_severity_label(vulnerability)
+                # Scope aggregation: any production package makes the advisory
+                # production-scoped; unknown scopes leave the advisory untagged
+                # rather than guessed. Pure-development advisories are tagged
+                # so reports can surface them separately without hiding them.
+                if scope == "production":
+                    advisory.scope = "production"
+                elif scope == "development" and advisory.scope is None:
+                    advisory.scope = "development"
 
     for advisory in advisories.values():
         if advisory.severity is RiskLevel.NONE:
             advisory.severity = RiskLevel.MEDIUM
     return advisories
+
+
+def _classify_scope(package: dict, lockfile: str) -> str | None:
+    """Best-effort classifier for dependency scope.
+
+    Returns ``"development"`` or ``"production"`` only when the lockfile format
+    gives us an explicit signal (npm's ``dev``/``optional`` flags, pip's
+    ``-dev``/``-test`` requirements filename). Unknown ecosystems return
+    ``None`` so we do not guess and accidentally downgrade a real production
+    dependency.
+    """
+    if not isinstance(package, dict):
+        return None
+    name_lower = lockfile.lower()
+    # npm package-lock.json: packages[].dev or packages[].optional mark non-prod
+    if name_lower.endswith("package-lock.json"):
+        if package.get("dev") is True or package.get("optional") is True:
+            return "development"
+        return "production"
+    # pip requirements files: conventional naming distinguishes dev/test deps
+    if name_lower.endswith((".txt", ".in")):
+        base = name_lower.rsplit("/", 1)[-1]
+        if any(token in base for token in ("-dev", "-test", "-tests", "dev-", "test-")):
+            return "development"
+        return "production"
+    return None
 
 
 def _package_advisories(entry: dict) -> list[tuple[list[str], list[dict]]]:
@@ -340,11 +402,21 @@ def _to_finding(
     message = f"{summary} {detail}"[:_MAX_MESSAGE]
 
     ecosystem = f" ({advisory.ecosystem})" if advisory.ecosystem else ""
-    evidence = (f"{'; '.join(packages[:3])}{ecosystem} · https://osv.dev/vulnerability/{primary}")[
-        :_MAX_EVIDENCE
-    ]
+    cvss_tail = f" · {advisory.cvss_label}" if advisory.cvss_label else ""
+    evidence = (
+        f"{'; '.join(packages[:3])}{ecosystem}{cvss_tail} · "
+        f"https://osv.dev/vulnerability/{primary}"
+    )[:_MAX_EVIDENCE]
+    if advisory.cvss_label:
+        sev_tag = advisory.advisory_severity_label or advisory.severity.value.upper()
+        message = f"{message} Advisory severity {sev_tag}; {advisory.cvss_label}."[:_MAX_MESSAGE]
 
     reason = suppression_reason(advisory.lockfile, suppress_globs)
+    scope = advisory.scope
+    if scope == "development":
+        message = f"Development-only dependency. {message}"[:_MAX_MESSAGE]
+    elif scope == "production":
+        message = f"Production dependency. {message}"[:_MAX_MESSAGE]
     return Finding(
         rule_id=rule_id,
         title=summary[:_MAX_DESCRIPTION],
@@ -356,6 +428,7 @@ def _to_finding(
         evidence=evidence,
         suppressed=reason is not None,
         suppression_reason=reason,
+        scope=scope,
     )
 
 
@@ -380,6 +453,48 @@ def _severity(vulnerability: dict) -> RiskLevel:
     # A CVSS vector is not re-scored locally: too easy to get wrong, and a wrong
     # "critical" would be worse than an honest "medium".
     return RiskLevel.MEDIUM
+
+
+def _advisory_severity_label(vulnerability: dict) -> str | None:
+    """Return the raw advisory severity tag (e.g. MODERATE, HIGH) if present."""
+    for key in ("database_specific", "ecosystem_specific"):
+        specific = vulnerability.get(key)
+        if not isinstance(specific, dict):
+            continue
+        value = specific.get("severity")
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+    return None
+
+
+def _cvss_label(vulnerability: dict) -> str | None:
+    """Extract a human-readable CVSS summary without re-scoring.
+
+    Returns ``"CVSS <score> (<source>)"`` when a numeric score is present, or
+    ``"CVSS vector: <...>"`` when only the vector string is available. The
+    label is meant for display alongside the advisory severity tag so readers
+    can see both signals; ReuseGuard never uses it to override the advisory's
+    own severity classification.
+    """
+    for key in ("database_specific", "ecosystem_specific"):
+        specific = vulnerability.get(key)
+        if not isinstance(specific, dict):
+            continue
+        cvss = specific.get("cvss")
+        if isinstance(cvss, dict):
+            score = cvss.get("score")
+            source = cvss.get("type") or cvss.get("source")
+            if isinstance(score, (int, float)):
+                suffix = f" ({source})" if isinstance(source, str) and source.strip() else ""
+                return f"CVSS {score:g}{suffix}"[:60]
+            vector = cvss.get("vectorString")
+            if isinstance(vector, str) and vector.strip():
+                return f"CVSS vector: {vector.strip()}"[:80]
+        # Some advisories put the score directly under database_specific.
+        direct_score = specific.get("cvss_v3_score") or specific.get("severity_score")
+        if isinstance(direct_score, (int, float)):
+            return f"CVSS {direct_score:g}"[:40]
+    return None
 
 
 def _results(payload: object) -> list | None:

@@ -200,8 +200,11 @@ class Settings:
     semgrep_rule_timeout: float = 30.0
     enable_gitleaks: bool = False
     gitleaks_timeout: float = 300.0
+    gitleaks_config: str | None = None
     enable_osv: bool = False
     osv_timeout: float = 300.0
+    osv_no_resolve: bool = True
+    osv_offline_db: str | None = None
     sandbox_mode: str = "off"
     sandbox_image: str = DEFAULT_IMAGE
     sandbox_timeout: float = DEFAULT_TIMEOUT_SECONDS

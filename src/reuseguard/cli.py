@@ -148,6 +148,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="overall gitleaks process limit, 10-3600 (default: 300)",
     )
     check.add_argument(
+        "--gitleaks-config",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "TOML file with custom gitleaks rules; ReuseGuard always forces "
+            "[extend] useDefault = true so the built-in rule set cannot be disabled. "
+            "The scanned repository's own .gitleaks.toml is still ignored."
+        ),
+    )
+    check.add_argument(
         "--osv",
         action="store_true",
         help=(
@@ -161,6 +171,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SECONDS",
         help="overall osv-scanner process limit, 10-3600 (default: 300)",
+    )
+    check.add_argument(
+        "--osv-resolve",
+        action="store_true",
+        default=False,
+        help=(
+            "allow osv-scanner to resolve transitive dependencies via the package "
+            "registry when a lockfile is incomplete; by default ReuseGuard passes "
+            "--no-resolve so only what the lockfile already records is queried"
+        ),
+    )
+    check.add_argument(
+        "--osv-offline",
+        type=Path,
+        metavar="DB_PATH",
+        help=(
+            "match against a pre-downloaded OSV database instead of querying "
+            "api.osv.dev; DB_PATH must be a local directory produced by "
+            "`osv-scanner --download-offline-databases`. Implies --no-resolve."
+        ),
     )
     check.add_argument(
         "--sandbox",
@@ -373,9 +403,26 @@ def _run_check(args: argparse.Namespace) -> int:
             )
 
     gitleaks_timeout = _pick(args.gitleaks_timeout, None, 300.0)
+    gitleaks_config: Path | None = args.gitleaks_config
+    if gitleaks_config is not None:
+        # Supplying a custom config implies the user wants gitleaks enabled.
+        args.gitleaks = True
     if args.gitleaks_timeout is not None and not args.gitleaks:
         print("error: --gitleaks-timeout requires --gitleaks", file=sys.stderr)
         return 2
+    if gitleaks_config is not None:
+        if not gitleaks_config.exists():
+            print(
+                f"error: gitleaks config path does not exist: {gitleaks_config}",
+                file=sys.stderr,
+            )
+            return 2
+        if not gitleaks_config.is_file():
+            print(
+                f"error: gitleaks config path must be a file: {gitleaks_config}",
+                file=sys.stderr,
+            )
+            return 2
     if args.gitleaks:
         if not enable_scan:
             print(
@@ -390,6 +437,34 @@ def _run_check(args: argparse.Namespace) -> int:
             )
 
     osv_timeout = _pick(args.osv_timeout, None, 300.0)
+    osv_no_resolve = not args.osv_resolve
+    osv_offline_db: Path | None = args.osv_offline
+    if args.osv_resolve and args.osv_offline is not None:
+        print(
+            "error: --osv-resolve cannot be combined with --osv-offline; "
+            "offline mode has no registry to resolve against",
+            file=sys.stderr,
+        )
+        return 2
+    if args.osv_offline is not None and not args.osv:
+        print("error: --osv-offline requires --osv", file=sys.stderr)
+        return 2
+    if args.osv_resolve and not args.osv:
+        print("error: --osv-resolve requires --osv", file=sys.stderr)
+        return 2
+    if osv_offline_db is not None:
+        if not osv_offline_db.exists():
+            print(
+                f"error: osv offline database path does not exist: {osv_offline_db}",
+                file=sys.stderr,
+            )
+            return 2
+        if not osv_offline_db.is_dir():
+            print(
+                f"error: osv offline database path must be a directory: {osv_offline_db}",
+                file=sys.stderr,
+            )
+            return 2
     if args.osv_timeout is not None and not args.osv:
         print("error: --osv-timeout requires --osv", file=sys.stderr)
         return 2
@@ -461,8 +536,11 @@ def _run_check(args: argparse.Namespace) -> int:
         semgrep_timeout=semgrep_timeout,
         enable_gitleaks=args.gitleaks,
         gitleaks_timeout=gitleaks_timeout,
+        gitleaks_config=str(gitleaks_config) if gitleaks_config is not None else None,
         enable_osv=args.osv,
         osv_timeout=osv_timeout,
+        osv_no_resolve=osv_no_resolve,
+        osv_offline_db=str(osv_offline_db) if osv_offline_db is not None else None,
         sandbox_mode=sandbox_mode,
         sandbox_image=sandbox_limits.image,
         sandbox_timeout=sandbox_limits.timeout_seconds,

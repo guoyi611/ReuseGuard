@@ -206,6 +206,29 @@ def test_build_idea_queries_keeps_short_terms_in_both_variants() -> None:
     assert queries[1].startswith("ai 2d ")
 
 
+def test_build_idea_queries_strict_adds_in_qualifier() -> None:
+    queries = build_idea_queries("AI 2D pixel art generator", strict=True)
+
+    assert all("in:name,description,topics" in query for query in queries)
+    assert queries[0].startswith("ai 2d pixel art ")
+
+
+def test_build_idea_queries_non_strict_omits_in_qualifier() -> None:
+    queries = build_idea_queries("AI 2D pixel art generator", strict=False)
+
+    assert all("in:name,description,topics" not in query for query in queries)
+
+
+def test_recall_idea_passes_strict_to_queries() -> None:
+    valid = make_repo(full_name="acme/pixel", description="AI 2D pixel art generator")
+    github = FakeGitHub(valid, results=[valid])
+
+    result = recall_idea("AI 2D pixel art", github, limit=5, now=NOW, strict=True)
+
+    assert result.queries
+    assert all("in:name,description,topics" in query for query in result.queries)
+
+
 def test_build_idea_queries_uses_broad_and_narrow_variants() -> None:
     queries = build_idea_queries(
         "A fast HTTP client with retries",
@@ -242,9 +265,79 @@ def test_score_idea_similarity_rewards_keyword_coverage() -> None:
         now=NOW,
     )
 
-    assert similarity.keywords == 40.0
+    # Keywords now weighted at 50 points; both match in name/description.
+    assert similarity.keywords == 50.0
     assert similarity.language == 20.0
     assert similarity.total > 80.0
+
+
+def test_score_idea_similarity_gives_partial_credit_for_description_only() -> None:
+    """Keywords found only in description get 70% credit vs name/topics."""
+    candidate = make_repo(
+        full_name="acme/generic",
+        description="A template for beginner lora projects",
+        topics=[],
+        language="Python",
+        stars=100,
+        pushed_at=NOW - timedelta(days=30),
+    )
+
+    similarity = score_idea_similarity(
+        ["template", "beginner", "lora"],
+        candidate,
+        language="Python",
+        now=NOW,
+    )
+
+    # All three keywords are in description only: 3 * 0.7 / 3 * 50 = 35.0
+    assert similarity.keywords == 35.0
+
+
+def test_score_idea_similarity_full_credit_for_name_topics_match() -> None:
+    """Keywords in name or topics get full credit."""
+    candidate = make_repo(
+        full_name="acme/template",
+        description="A starter project",
+        topics=["pixel", "beginner"],
+        language="Python",
+        stars=100,
+        pushed_at=NOW - timedelta(days=30),
+    )
+
+    similarity = score_idea_similarity(
+        ["template", "pixel"],
+        candidate,
+        language="Python",
+        now=NOW,
+    )
+
+    # "template" in name (1.0), "pixel" in topics (1.0): 2/2 * 50 = 50.0
+    assert similarity.keywords == 50.0
+
+
+def test_recall_idea_records_recalled_by_query() -> None:
+    matching = make_repo(
+        full_name="acme/http",
+        description="A fast HTTP client",
+        language="Python",
+    )
+    github = FakeGitHub(matching, results=[matching])
+
+    result = recall_idea("fast HTTP client", github, limit=2, language="Python", now=NOW)
+
+    assert result.candidates[0].recalled_by is not None
+    assert result.candidates[0].recalled_by in result.queries
+
+
+def test_recall_similar_records_recalled_by_query() -> None:
+    seed = make_repo()
+    alternative = make_repo(full_name="acme/alt")
+    github = FakeGitHub(seed, results=[alternative])
+
+    result = recall_similar(seed, github, limit=2, now=NOW)
+
+    assert result.candidates[0].recalled_by is not None
+    assert result.candidates[0].recalled_by in result.queries
 
 
 def test_recall_idea_ranks_matching_candidates_without_a_seed() -> None:

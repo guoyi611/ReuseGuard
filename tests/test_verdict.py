@@ -158,3 +158,20 @@ def test_decide_does_not_mark_verdicts_withheld() -> None:
     # Hiding a verdict is a report-level presentation choice, not a decision rule.
     assert verdict.decision is Decision.INSPECT
     assert verdict.withheld is False
+
+
+def test_decide_adds_license_unknown_limitation() -> None:
+    repo = make_repo(license_spdx=None)
+
+    verdict = decide(repo, _filter(), _scan())
+
+    assert any("license" in item.lower() for item in verdict.limitations)
+
+
+def test_decide_omits_license_limitation_when_declared() -> None:
+    repo = make_repo(license_spdx="MIT")
+
+    verdict = decide(repo, _filter(), _scan())
+
+    assert not any("license" in item.lower() and "unconfirmed" in item.lower()
+                   for item in verdict.limitations)

@@ -152,6 +152,7 @@ class Pipeline:
             limit=self.settings.max_candidates,
             min_stars=self.settings.min_stars,
             language=language,
+            strict=self.settings.strict_idea,
         )
         warnings.extend(recall.warnings)
         if not recall.candidates:

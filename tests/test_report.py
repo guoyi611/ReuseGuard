@@ -230,6 +230,113 @@ def test_empty_idea_report_is_rendered() -> None:
     assert "No candidate repositories were found." in markdown
 
 
+def test_recalled_by_is_rendered_in_markdown() -> None:
+    repo = RepoMeta(full_name="acme/http", html_url="https://github.com/acme/http")
+    report = Report(
+        tool_version="0.7.2",
+        generated_at=datetime.now(timezone.utc),
+        seed=None,
+        query="fast HTTP client",
+        assessments=[
+            Assessment(
+                candidate=Candidate(
+                    repo=repo,
+                    role="candidate",
+                    recalled_by="http client language:Python stars:>=50 fork:false",
+                ),
+                filter=FilterResult(status=FilterStatus.PASSED, score=8.0),
+                scan=ScanReport(status=ScanStatus.SCANNED, files_scanned=10),
+                verdict=Verdict(decision=Decision.USE, confidence=Confidence.HIGH),
+            )
+        ],
+    )
+
+    markdown = render_markdown(report)
+
+    assert "**Recalled by:**" in markdown
+    assert "http client language:Python" in markdown
+
+
+def test_license_unknown_warning_is_rendered() -> None:
+    repo = RepoMeta(
+        full_name="acme/unlicensed",
+        html_url="https://github.com/acme/unlicensed",
+        license_spdx=None,
+    )
+    report = Report(
+        tool_version="0.7.2",
+        generated_at=datetime.now(timezone.utc),
+        seed=repo,
+        assessments=[
+            Assessment(
+                candidate=Candidate(repo=repo, role="seed"),
+                filter=FilterResult(status=FilterStatus.PASSED, score=8.0),
+                scan=ScanReport(status=ScanStatus.SCANNED, files_scanned=10),
+                verdict=Verdict(decision=Decision.USE, confidence=Confidence.HIGH),
+            )
+        ],
+    )
+
+    markdown = render_markdown(report)
+
+    assert "License not declared" in markdown
+    assert "Manual confirmation is required" in markdown
+
+
+def test_license_declared_does_not_show_warning() -> None:
+    repo = RepoMeta(
+        full_name="acme/mit",
+        html_url="https://github.com/acme/mit",
+        license_spdx="MIT",
+    )
+    report = Report(
+        tool_version="0.7.2",
+        generated_at=datetime.now(timezone.utc),
+        seed=repo,
+        assessments=[
+            Assessment(
+                candidate=Candidate(repo=repo, role="seed"),
+                filter=FilterResult(status=FilterStatus.PASSED, score=8.0),
+                scan=ScanReport(status=ScanStatus.SCANNED, files_scanned=10),
+                verdict=Verdict(decision=Decision.USE, confidence=Confidence.HIGH),
+            )
+        ],
+    )
+
+    markdown = render_markdown(report)
+
+    assert "License not declared" not in markdown
+    assert "MIT" in markdown
+
+
+def test_recalled_by_appears_in_json() -> None:
+    repo = RepoMeta(full_name="acme/http", html_url="https://github.com/acme/http")
+    report = Report(
+        tool_version="0.7.2",
+        generated_at=datetime.now(timezone.utc),
+        seed=None,
+        query="fast HTTP client",
+        assessments=[
+            Assessment(
+                candidate=Candidate(
+                    repo=repo,
+                    role="candidate",
+                    recalled_by="http client stars:>=50 fork:false",
+                ),
+                filter=FilterResult(status=FilterStatus.PASSED, score=8.0),
+                scan=ScanReport(status=ScanStatus.SCANNED, files_scanned=10),
+                verdict=Verdict(decision=Decision.USE, confidence=Confidence.HIGH),
+            )
+        ],
+    )
+
+    payload = json.loads(render_json(report))
+
+    assert payload["assessments"][0]["candidate"]["recalled_by"] == (
+        "http client stars:>=50 fork:false"
+    )
+
+
 def _sandbox_report(sandbox: SandboxReport) -> Report:
     repo = RepoMeta(full_name="acme/seed", html_url="https://github.com/acme/seed")
     return Report(

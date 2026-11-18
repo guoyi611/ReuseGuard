@@ -45,9 +45,8 @@ v0.7.1 已经可用：
 - 输出 Markdown 或 JSON 报告
 - 用 `--fail-on` 接入 CI
 
-尚未实现：在沙箱内执行仓库行为（安装、导入、运行测试）；OSV 离线数据库模式。
-沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。行为探测的设计草案见
-[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待确认，未实现）。
+尚未实现：在沙箱内执行仓库行为（安装、导入、运行测试）。沙箱当前只验证“容器隔离是否按配置生效”，不是行为分析。行为探测的设计已在 2026-11-18 确认，第 1 步（数据模型 + CLI 校验 +
+配置错误边界）已实现：`--behavior` 参数可以被解析和校验，但**还不会启动任何容器**，也不会执行仓库代码。详见 [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)。
 
 ## 工作流
 
@@ -343,17 +342,30 @@ v0.3 增加了一个**默认关闭**的容器隔离检查。它验证 ReuseGuard
 
 > **一次运行、一种配置，不等于安全。** 探测通过只说明这次容器隔离按配置生效；它没有执行仓库代码，不能证明仓库无害，也不代表后续版本。
 
-## 行为探测（设计阶段，尚未实现）
+## 行为探测（M4，第 1 步已完成：只校验，不执行）
 
-M4 的下一步是在一次性容器里按固定协议执行仓库的 `import` / `test`，记录进程、文件写入、
-网络能力、退出码和资源使用。**当前版本没有实现，也不会执行仓库代码。**
+M4 的行为探测会在一次性容器里按固定协议执行仓库的 `import` / `test`，记录进程、文件写入、
+网络能力、退出码和资源使用。设计已确认（[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)），
+**当前只实现了第 1 步：数据模型、CLI 参数校验和配置错误边界。**
 
-设计草案（探针协议、证据 schema、输出上限、镜像 digest 锁定、超时/OOM/逃逸记录，
-以及“单次运行 ≠ 安全”的措辞）见
-[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)。设计确认前不会开始实现。
+```text
+--behavior [import|test|all]   默认 off；裸 --behavior 等价 all
+--behavior-image IMAGE@sha256:...  必填，必须带 @sha256:，拒绝 tag
+```
 
-> 行为探测即使实现，也只提供“一次运行”的行为证据，不是安全证明；默认关闭，必须显式
-> 开启并提供 `@sha256:` 锁定的镜像。
+现在的行为（第 1 步）：
+
+| 项 | 第 1 步的实际行为 |
+| --- | --- |
+| 执行 | **不启动容器、不执行仓库代码**；pipeline 不消费这些设置 |
+| 参数校验 | 缺镜像、tag 而非 digest、范围越界、与 `--no-scan` 同时使用 → 退出码 2 |
+| 开关 | 只有显式 `--behavior` 才会开启；`--sandbox auto` **不会**自动开启它 |
+| 单独出现 | `--behavior-image` 或 `--behavior-*` 没有 `--behavior` → 参数错误，避免误以为已开启 |
+| YAML | `behavior` 节只能调整上限和镜像；`behavior.enabled: true` → `ConfigError` |
+| 报告 | `Assessment.behavior` 字段存在（默认 `null`），本次不会产生行为证据 |
+
+> 行为探测即使完全实现，也只提供“一次运行”的行为证据，不是安全证明；默认关闭，必须显式
+> 开启并提供 `@sha256:` 锁定的镜像。没有观察到异常也不等于安全。
 
 ## 安全模型
 
@@ -405,6 +417,11 @@ suppress:
 
 优先级：**显式 CLI 参数 > YAML > 内置默认值**。配置文件里的未知 key、未知规则 ID、非法 severity 会直接报错，避免拼写错误悄悄放宽策略。`suppress.paths` 命中的发现仍保留在 JSON 中，但标记为 suppressed，不计入风险等级。
 
+`behavior` 节是例外：策略文件**不能开启**行为探测。它只能调整上限和镜像（镜像同样必须带
+`@sha256:`），`behavior.enabled`、`behavior.mode`、`behavior.keep_workdir` 一律报
+`ConfigError`——执行不可信代码必须是显式的命令行动作。注释示例见
+[examples/reuseguard.yaml](examples/reuseguard.yaml)。
+
 ## CLI
 
 ```text
@@ -437,6 +454,16 @@ reuseguard --version
 | `--sandbox [MODE]` | off | 容器隔离检查：`auto` 只跑 high/critical，`all` 或裸参数跑全部，`off` 关闭 |
 | `--sandbox-image IMAGE` | python:3.11-slim | 沙箱镜像；必须已在本地，不会自动 pull |
 | `--sandbox-timeout SECONDS` | 20 | 单次沙箱运行上限（1–600），超时杀容器 |
+| `--behavior [MODE]` | off | 行为探测（M4 第 1 步：只校验，不执行）；`import` / `test` / `all`，裸参数等价 `all` |
+| `--behavior-image IMAGE` | — | 必填（`--behavior` 非 off 时），必须带 `@sha256:`，不会自动 pull |
+| `--behavior-timeout SECONDS` | 300 | 单次行为探测总预算（30–1800） |
+| `--behavior-phase-timeout SECONDS` | 120 | 单个阶段预算（10–900） |
+| `--behavior-memory-mb MB` | 512 | 行为容器内存上限（128–4096） |
+| `--behavior-cpus N` | 1.0 | 行为容器 CPU 上限（0.1–4.0） |
+| `--behavior-pids N` | 128 | 行为容器 PID 上限（16–512） |
+| `--behavior-max-work-mb MB` | 512 | 工作目录字节上限（64–4096） |
+| `--behavior-max-work-files N` | 50000 | 工作目录文件数上限（1000–200000） |
+| `--behavior-keep-workdir` | off | 保留行为探测的工作目录（容器仍会被删除） |
 | `--scorecard-min SCORE` | 2.0 | 低于该分数直接跳过 |
 | `--timeout SECONDS` | 20 | 单次网络请求超时 |
 | `--max-repo-mb MB` | 150 | 单仓库下载上限 |
@@ -460,9 +487,10 @@ reuseguard --version
 - `--discover-only` 只做候选发现，不下载快照、不做静态扫描；报告里隐藏的结论不是安全判断。
 - 不扫描 vendored 依赖、二进制文件、生成代码；这些地方也可能有风险。
 - 结果是运行时刻的快照；之后的新 commit 可能行为不同。
-- v0.3 的沙箱只验证容器隔离配置，不执行仓库代码；行为探测仍是设计草案
-  （[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)），未实现。两者都不能替代
-  人工审计。
+- v0.3 的沙箱只验证容器隔离配置，不执行仓库代码。
+- 行为探测（[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)）只实现了第 1 步：
+  `--behavior` 参数会被解析和校验，但**不会执行任何仓库代码**，报告里的
+  `assessment.behavior` 始终是 `null`。沙箱和行为探测都不能替代人工审计。
 - 沙箱需要本机 Docker 守护进程和预拉取的镜像；不可用时只记 warning，不改变结论。
 - Semgrep 的覆盖范围完全取决于你提供的规则集；ReuseGuard 不内置或联网获取规则。
 - gitleaks 只扫描默认分支快照，不覆盖 git 历史；漏报取决于其内置规则，没有命中不等于没有凭据。
@@ -490,8 +518,9 @@ ruff format --check src tests
 - **M3（已完成）**：`--idea` 自然语言需求输入、关键词召回与排序
 - **M4（进行中）**：隔离动态验证；已完成安全骨架与 CLI 接入（Docker 检测、
   加固容器命令、隔离探测、`--sandbox` 触发、报告区块、fake runner 测试），
-  行为探测设计草案见 [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待确认），
-  待做“在沙箱内执行仓库行为”
+  行为探测设计已于 2026-11-18 确认（[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)），
+  第 1 步（数据模型、`--behavior` 参数校验、YAML 错误边界）已完成但不执行任何容器；
+  待做 digest 校验/preflight、工作副本与文件差异、阶段命令、采样与超时、报告与结论 caveat
 - **M5（已完成）**：可插拔外部扫描器。Semgrep（本地规则、替换内置扫描）、
   gitleaks（凭据、追加）、osv-scanner（依赖漏洞、追加）；统一 `Finding`、
   多扫描器合并、降级与错误边界

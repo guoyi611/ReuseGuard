@@ -1,4 +1,4 @@
-﻿# ReuseGuard 项目设计
+# ReuseGuard 项目设计
 
 > 复用开源项目前的安全准入编排层。
 >
@@ -52,6 +52,10 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
+- 行为探测第 1 步（M4，2026-11-18）：`BehaviorReport` 等数据契约、
+  `Assessment.behavior`、`--behavior` 系列 CLI 参数与交叉校验、
+  YAML `behavior` 节（只能调上限/镜像，`enabled` 直接 `ConfigError`）；
+  **不启动任何容器，不执行仓库代码**
 - 测试：fake adapter / fake runner，全离线
 - 打包：v0.7.1 wheel 构建成功（用 `.venv` 的 Python），安装到 `.venv` 后 console script
   验证通过（`reuseguard --version` → 0.7.1 / `demo` / `--discover-only`）；
@@ -61,8 +65,10 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 
 未实现：
 
-- 在沙箱内执行仓库行为（安装、导入、运行测试）；设计草案见
-  [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待确认，尚未实现）
+- 在沙箱内执行仓库行为（安装、导入、运行测试）。设计已确认（2026-11-18），
+  第 1 步（数据模型 / CLI 校验 / 配置边界）已完成；第 2 步起（digest 校验、preflight、
+  工作副本、阶段命令、采样、超时/OOM、报告与结论 caveat）尚未实现，见
+  [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md) §14
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
 - Semgrep 真实二进制验收（验收清单见 [docs/semgrep-acceptance.md](docs/semgrep-acceptance.md)，
   待用户提供本地规则后执行）
@@ -86,7 +92,8 @@ src/reuseguard/
 │   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
 │   ├── gitleaks.py     # gitleaks JSON → 统一 ScanReport（凭据脱敏）
 │   ├── osv.py          # osv-scanner JSON → 统一 ScanReport（依赖漏洞）
-│   └── sandbox.py      # Docker 检测 + 加固命令 + 隔离探测
+│   ├── sandbox.py      # Docker 检测 + 加固命令 + 隔离探测
+│   └── behavior.py     # 行为探测请求校验（digest 镜像、范围、交叉规则）；不执行
 └── stages/
     ├── recall.py       # 查询构造、相似度、召回
     ├── reputation.py   # Scorecard → FilterResult
@@ -115,8 +122,11 @@ src/reuseguard/
 | `Finding` | 单条静态发现 | rule_id, severity, path, line, evidence, suppressed |
 | `ScanReport` | 扫描结果 | status, risk, findings, files_scanned, truncated, scanner（合并后可为 `semgrep+gitleaks`） |
 | `SandboxReport` | 一次容器隔离探测的证据 | status, image, exit_code, timed_out, containment_ok, probe, error |
+| `BehaviorReport` | 一次行为探测的证据（M4 第 1 步只定义契约，尚不产生） | status, schema, run_id, image, container, limits, phases, processes, files, network, resources, integrity, truncations, warnings |
+| `BehaviorPhase` / `CapturedStream` | 单个阶段的固定 argv、退出码、OOM、有界输出尾部 | name, argv, exit_code, docker_exit_code, signal, status, timed_out, oom_killed, stdout/stderr(trust) |
+| `ProcessSample` / `FileChange` / `NetworkEvidence` / `ResourceUsage` / `IntegrityEvidence` | 采样进程、最终状态文件差异、网络能力、资源峰值、隔离完整性 | 见 [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md) §9 |
 | `Verdict` | 最终结论 | decision, confidence, reasons, limitations, withheld（仅展示层） |
-| `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict, sandbox |
+| `Assessment` | 一个仓库的全部证据 | candidate, filter, scan, verdict, sandbox, behavior |
 | `Report` | 一次运行的完整结果 | seed, query, assessments, queries, warnings, settings, discover_only |
 
 `Report.to_dict()` 会递归把 dataclass / Enum / datetime / Path 转成 JSON 类型，并附加
@@ -297,6 +307,15 @@ scan risk low/none:
 severity 或类型错误都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()`
 会把最终生效的规则策略写入报告，便于审计。
 
+`behavior` 节（M4 第 1 步）是受限制的例外：策略文件只能调整行为探测的上限和镜像，
+**不能开启探测**。
+
+- 允许：`image`（必须带 `@sha256:`）、`timeout_seconds`、`phase_timeout_seconds`、
+  `memory_mb`、`cpus`、`pids`、`max_work_mb`、`max_work_files`，取值范围与 CLI 相同；
+- 拒绝：`enabled`（无论 true 还是 false）、`mode`、`keep_workdir` —— 直接 `ConfigError`，
+  错误信息写明“执行仓库代码必须是显式命令行动作”；
+- 未知 key 仍然报错；`Policy.behavior` 只携带覆盖值，`Policy()` 默认是空覆盖。
+
 ### 7.7 沙箱隔离检查（M4，默认关闭）
 
 触发模式（`--sandbox`）：
@@ -327,9 +346,43 @@ severity 或类型错误都会直接报 `ConfigError`，不会静默忽略。`Se
 判为恶意。报告明确写“一次运行、不代表后续版本、不是安全证明”。
 
 行为探测（M4 的下一阶段）不在本节范围内：它会在一次性容器里执行仓库代码，必须显式
-开启、用 `@sha256:` 锁定镜像，并按固定协议记录证据。设计草案见
-[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)；设计确认前不实现，也不在沙箱里
-执行仓库代码。
+开启、用 `@sha256:` 锁定镜像，并按固定协议记录证据。设计已于 2026-11-18 确认，第 1 步
+已实现（见 §7.7），第 2 步起才会真正启动容器。
+
+### 7.7 行为探测（M4，第 1 步：只校验，不执行）
+
+设计见 [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（2026-11-18 确认，§15 六个
+决定全部通过）。本项目只实现第 1 步（§14 步骤 1）：数据契约、CLI 参数与交叉校验、
+YAML 错误边界。**不启动容器、不调用 `docker run`、不执行仓库代码**；pipeline 不消费
+`Settings.behavior_*`，`Assessment.behavior` 在真实运行中始终为 `None`。
+
+CLI 参数（默认 off）：
+
+- `--behavior [import|test|all]`：裸参数等价 `all`；`off` 显式关闭
+- `--behavior-image IMAGE@sha256:...`：镜像必须按 digest 锁定，**拒绝 tag**（可被重新指向）
+- `--behavior-timeout` 30–1800（默认 300）、`--behavior-phase-timeout` 10–900（默认 120）
+- `--behavior-memory-mb` 128–4096（512）、`--behavior-cpus` 0.1–4.0（1.0）、
+  `--behavior-pids` 16–512（128）
+- `--behavior-max-work-mb` 64–4096（512）、`--behavior-max-work-files` 1000–200000（50000）
+- `--behavior-keep-workdir`：保留工作副本（容器仍会删除；第 1 步不产生任何目录）
+
+交叉校验（`adapters/behavior.py::resolve_behavior_mode`）：
+
+- `--behavior` 与 `--no-scan` / `features.scan: false` 互斥：没有快照就没有东西可跑
+- `--behavior` 非 off 时 `--behavior-image` 必填
+- `--behavior-image` 或任一 `--behavior-*` 单独出现 → 参数错误，避免误以为已开启
+- `--behavior` **不会**因 `--sandbox auto` 自动开启
+
+数据契约（`models.py`，不改变 `SandboxReport` 语义）：`BehaviorMode`、`BehaviorStatus`、
+`BehaviorPhaseStatus`、`TrustLevel`、`CapturedStream`、`ToolPreflight`、`BehaviorPhase`、
+`ProcessSample` / `ProcessEvidence`、`FileChange` / `FileEvidence`、`NetworkEvidence`、
+`ResourceUsage`、`IntegrityEvidence`、`BehaviorImage`、`BehaviorLimitsInfo`（报告里记录
+的上限副本，与请求侧带校验的 `BehaviorLimits` 区分）、`BehaviorReport`。默认值保守：
+仓库输出恒为 `untrusted_repo_output`，`integrity.tamper_possible` 恒为 `True`，
+`BehaviorReport.executed` 在没有任何阶段真正运行时为 `False`。
+
+下一步（§14 步骤 2+）：镜像 digest 校验与 preflight、工作副本与文件差异、阶段固定命令、
+进程/资源采样、超时与 OOM、报告区块与 verdict caveat。
 
 ### 7.8 外部扫描器：Semgrep（M5 第一步）
 
@@ -582,8 +635,11 @@ reuseguard check psf/requests --no-recall --osv
     - `--sandbox off|auto|all`、`--sandbox-image`、`--sandbox-timeout`；默认 off
     - 报告“Sandbox”区块与 summary 列；结论只加 caveat，不升级也不判恶意
   - 待办：真实 Docker 手动冒烟验收；在沙箱内执行仓库行为（安装 / 导入 / 测试）
-    - 已完成设计草案：[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待用户确认，
-      确认前不写实现、不执行仓库代码）
+    - 设计已于 2026-11-18 确认：[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)
+    - 第 1 步已完成（feat/m4-behavior-probe）：数据契约、`--behavior` 参数与交叉校验、
+      YAML `behavior` 节错误边界；不启动容器、不执行仓库代码
+    - 待做第 2–7 步：digest 校验 + preflight、工作副本与文件差异、阶段命令、
+      采样与超时/OOM、报告区块与 verdict caveat、手动冒烟（需先询问用户）
   - 边界：单次运行只代表当次容器配置，不是“无害证明”
 - **M5（已完成）**：外部扫描器
   - Semgrep 适配器
@@ -632,7 +688,10 @@ reuseguard check psf/requests --no-recall --osv
 | 沙箱触发 | `off` / `auto` / `all` 三态 | 默认零副作用；high/critical 与显式请求都能覆盖 |
 | 沙箱失败 | 只写 warning，不改变结论 | 隔离失败是环境证据，不是仓库恶意证据 |
 | 沙箱镜像 | 不自动 pull，`--pull=never` | 避免隐式联网和镜像供应链副作用 |
-| 行为探测（设计） | 默认关闭、显式 `--behavior`、必须 `@sha256:`、每阶段一容器、结论最多 INSPECT | 设计草案待确认；执行不可信代码不能自动化，也不能用一次运行证明安全 |
+| 行为探测（设计） | 默认关闭、显式 `--behavior`、必须 `@sha256:`、每阶段一容器、结论最多 INSPECT | 执行不可信代码不能自动化，也不能用一次运行证明安全 |
+| 行为探测 YAML | 策略只能调上限和镜像，`behavior.enabled` 直接 `ConfigError` | 团队策略不应能“悄悄打开”执行不可信代码；镜像仍必须是 digest |
+| 行为探测镜像 | 拒绝 tag，只接受 `name[:tag]@sha256:<64 hex>` | tag 可以在评审后被重新指向，无法标识实际执行的镜像 |
+| 行为探测报告上限 | 证据里的上限副本叫 `BehaviorLimitsInfo`，请求侧带校验的叫 `BehaviorLimits` | 两个同名类型一个“记录”一个“校验”，容易误用 |
 | 短词提取 | 显式 allowlist（AI / 2D / C# / C++ 等） | 不放开任意短词或标点，避免把 `ok`、`my` 带进查询 |
 | 非法仓库名 | 召回边界过滤 + warning | 一个 `owner/.github` 不应让整次运行崩溃；跳过必须记录，不能静默 |
 | `--discover-only` | 只改 Markdown 展示，JSON 保留 decision + `withheld` | 判定规则不因展示需求改变；隐藏结论不等于“安全”，也不能让机器读者误以为扫描过 |

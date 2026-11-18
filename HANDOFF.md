@@ -1,10 +1,11 @@
 # ReuseGuard 交接文档
 
-> 最后更新：2026-11-11
+> 最后更新：2026-11-18
 > 仓库：https://github.com/guoyi611/ReuseGuard
-> 分支：`main`（并行开发见 `develop` / `feat/*`，见 `docs/parallel-development.md`）
+> 分支：`main`（并行开发见 `develop` / `feat/*`，见 `docs/parallel-development.md`）；
+> 当前工作分支 `feat/m4-behavior-probe`
 > 当前版本：`0.7.1`
-> 基线提交：`2db0e9a`（并行开发分支与 worktree 建立；以 `git log` 为准）
+> 基线提交：`41dc80a`（M4 设计确认；以 `git log` 为准）
 > CI：全部通过（Ubuntu 3.10/3.11/3.12 + Windows 3.11）
 
 这份文档用于把当前会话的上下文交给下一个对话。新对话请先读本文件，再执行
@@ -33,11 +34,11 @@ ReuseGuard 是“复用开源项目前的安全准入编排层”，不是新的
 | M1 | 完成 | 种子 URL → 召回 → Scorecard → 静态扫描 → Markdown |
 | M2 | 完成 | JSON、`--fail-on`、误报抑制、离线 demo、测试、CI、打包 |
 | M3 | 完成 | `--idea` 自然语言输入、关键词召回与排序、`Report.seed=None` |
-| M4 | **进行中（骨架 + 设计草案，待确认）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；行为探测设计见 `docs/m4-behavior-probe.md`，**用户确认前不实现、不在沙箱内执行仓库代码**；真实 Docker 冒烟待做 |
+| M4 | **进行中（骨架 + 设计已确认 + 行为探测第 1 步）** | 隔离动态验证：Docker 检测、加固容器、隔离探测、`--sandbox` CLI / pipeline / 报告均已接入；行为探测设计已于 2026-11-18 确认，**第 1 步（数据模型 / CLI 校验 / YAML 错误边界）已完成，仍不启动容器、不执行仓库代码**；第 2–7 步与真实 Docker 冒烟待做 |
 | M5 | **完成** | 三个适配器：Semgrep（替换内置）、gitleaks（追加凭据）、osv-scanner（追加依赖漏洞）；统一 Finding、合并、降级/错误边界 |
 | M6 | 完成 | YAML 策略：阈值、限制、features、规则启停、severity、抑制路径 |
 
-当前测试：**375 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
+当前测试：**529 个，全部离线通过**；`ruff check` / `ruff format --check` 全绿；
 v0.7.1 wheel 已构建并安装到 `.venv`，console script 验证通过。
 
 ## 3. 代码地图
@@ -59,7 +60,8 @@ src/reuseguard/
 │   ├── semgrep.py      # Semgrep JSON → 统一 ScanReport
 │   ├── gitleaks.py     # gitleaks JSON → 统一 ScanReport（凭据脱敏）
 │   ├── osv.py          # osv-scanner JSON → 统一 ScanReport（依赖漏洞）
-│   └── sandbox.py      # Docker 检测 + 加固 docker run + 隔离探测
+│   ├── sandbox.py      # Docker 检测 + 加固 docker run + 隔离探测
+│   └── behavior.py     # 行为探测请求校验（digest 镜像 / 范围 / 交叉规则），不执行
 └── stages/
     ├── recall.py       # seed 召回 + idea 召回 + 相似度
     ├── reputation.py   # Scorecard → FilterResult
@@ -85,6 +87,7 @@ tests/
 ├── test_gitleaks.py
 ├── test_osv.py
 ├── test_snapshot.py
+├── test_behavior.py    # M4 行为探测：数据契约 + 请求校验
 └── test_verdict.py
 ```
 
@@ -1028,3 +1031,98 @@ ruff 全绿，已 push。
   HANDOFF 4.2 / 9.2。
 - 开放问题（project.md §12 #11–#14）本轮已全部处理；剩余 #7（`.semgrepignore`
   覆盖缺口）待 Semgrep 验收后决定缓解方案。
+
+## 4.16 本会话（2026-11-18）：M4 步骤 1 — 数据模型 + CLI 校验 + 配置错误边界
+
+在 `feat/m4-behavior-probe` worktree（从 `main` 的 `41dc80a` 拉出）完成
+[docs/m4-behavior-probe.md](docs/m4-behavior-probe.md) §14 的**第 1 步**。设计 §15 的 6 个
+决定已由用户于 2026-11-18 确认。**本轮没有调用任何 Docker 命令，没有执行仓库代码，
+没有改动扫描器逻辑，没有使用 `--config auto`。**
+
+### 4.16.1 数据契约（`src/reuseguard/models.py`）
+
+新增（`SandboxReport` 语义未改动）：
+
+- 枚举：`BehaviorMode`（off/import/test/all）、`BehaviorStatus`（含 `refused`、
+  `integrity_failure`）、`BehaviorPhaseStatus`（§4.5 的 11 个状态）、`TrustLevel`（§9.1）
+- 证据：`CapturedStream`、`ToolPreflight`、`BehaviorPhase`、`ProcessSample` /
+  `ProcessEvidence`、`FileChange` / `FileEvidence`、`NetworkEvidence`、
+  `ResourceUsage`、`IntegrityEvidence`、`BehaviorImage`、`BehaviorLimitsInfo`
+- `BehaviorReport`（`schema="reuseguard.behavior/1"`、`protocol_version=1`），
+  新增 `executed` 属性：没有任何阶段真正运行时为 `False`
+- `Assessment.behavior: BehaviorReport | None = None`；`to_dict()` 自动序列化为 `null`
+
+默认值保守：仓库输出恒为 `untrusted_repo_output`，`integrity.tamper_possible` 恒为
+`True`，还没跑过的报告不声称观察到任何东西。
+
+> 命名注意：报告里的上限副本叫 `BehaviorLimitsInfo`（记录用），请求侧带校验的叫
+> `BehaviorLimits`（`adapters/behavior.py`）。两个同名类型一个是“记录”一个是“校验”，
+> 容易误用，所以刻意分开。
+
+### 4.16.2 请求校验（`src/reuseguard/adapters/behavior.py`，新文件）
+
+- `validate_image_reference()`：只接受 `name[:tag]@sha256:<64 位小写 hex>`；tag 直接拒绝，
+  错误信息说明“tag 可以被重新指向”。返回原样字符串（不 strip），保证证据与实际传给
+  docker 的一致。
+- 范围校验（§12.1）：timeout 30–1800、phase timeout 10–900、memory 128–4096、
+  cpus 0.1–4.0、pids 16–512、max_work_mb 64–4096、max_work_files 1000–200000；
+  `behavior_int` / `behavior_number` 供 CLI、YAML、测试共用，错误措辞一致。
+- `BehaviorLimits`（请求侧，冻结 dataclass，构造即校验）、`BehaviorOptions`
+  （mode 不能是 off、镜像必填、`phases` 把 all 展开成 `import → test`）。
+- `resolve_behavior_mode()`：§12.1 的交叉规则——与 `--no-scan` 互斥、开启必须给镜像、
+  单独出现的 `--behavior-image` / `--behavior-*` 报错、**不看 sandbox 模式**
+  （`--sandbox auto` 永远不打开行为探测）。
+  `image_from_cli=False` 用于区分“YAML 里预置的镜像”——策略可以预先钉住镜像，
+  但不能借此开启探测。
+
+### 4.16.3 CLI（`src/reuseguard/cli.py`）
+
+- 新增 `--behavior`、`--behavior-image`、`--behavior-timeout`、`--behavior-phase-timeout`、
+  `--behavior-memory-mb`、`--behavior-cpus`、`--behavior-pids`、`--behavior-max-work-mb`、
+  `--behavior-max-work-files`、`--behavior-keep-workdir`；默认全部关闭。
+- 裸 `--behavior` 等价 `all`；`--behavior off` 显式关闭。
+- 校验失败统一在 stderr 打印 `error: ...` 并返回退出码 2（`_UsageError`）。
+- 转发到 `Settings.behavior_*`，`public_dict()` 里可见；**pipeline 还不消费这些字段**。
+
+### 4.16.4 配置（`src/reuseguard/config.py`）
+
+- `Settings` 新增 `behavior_mode`（默认 `"off"`）、`behavior_image`、`behavior_timeout`、
+  `behavior_phase_timeout`、`behavior_memory_mb`、`behavior_cpus`、`behavior_pids`、
+  `behavior_max_work_mb`、`behavior_max_work_files`、`keep_behavior_workdir`。
+- 顶层新增 `behavior` 节（`Policy.behavior: PolicyBehavior`）。允许：
+  `image`（必须 digest）、`timeout_seconds`、`phase_timeout_seconds`、`memory_mb`、
+  `cpus`、`pids`、`max_work_mb`、`max_work_files`，范围与 CLI 相同。
+- **`behavior.enabled`（true 或 false）、`behavior.mode`、`behavior.keep_workdir` 一律
+  `ConfigError`**，错误信息写明“执行仓库代码必须是显式命令行动作”；未知 key 仍然报错。
+- 合并优先级：CLI > YAML > 内置默认。YAML 单独存在时 `behavior_mode` 仍是 `"off"`，
+  `behavior_image` 不转发给 pipeline。
+
+### 4.16.5 测试
+
+- `tests/test_behavior.py`（新）：枚举值即 JSON 契约、默认值保守性、完整报告序列化、
+  `Assessment.behavior=None → null`、镜像引用 14 个非法样例、范围边界（含闭区间、
+  NaN/Inf、bool）、`BehaviorOptions`。
+- `tests/test_cli.py`：`--behavior` 解析、缺镜像、tag 镜像、单独出现、与 `--no-scan`
+  互斥、`--sandbox auto` 不开启、14 个范围越界样例、默认值与显式值转发、`public_dict()`。
+- `tests/test_policy.py`：`behavior` 节合法值、`enabled/mode/keep_workdir` 与各类非法值
+  （22 个样例）、CLI 合并优先级、`--behavior-image` 覆盖策略、策略单独存在不启用。
+- 测试总数 427 → **529**（+102），全部离线，不涉及 Docker。
+
+### 4.16.6 约束遵守情况
+
+- 未调用 `docker run` / `docker info`；`adapters/behavior.py` 只做纯校验。
+- 未改扫描器逻辑、verdict 判定、report 渲染、sandbox 适配器。
+- 未使用 `--config auto`；未把“没有发现”写成“安全”。
+- 每步补测试 → pytest + ruff → 单独 commit。
+
+### 4.16.7 下一步（§14 第 2 步起）
+
+1. 镜像 digest 校验（`docker image inspect` 的 `RepoDigests` 对比）+ preflight 配置校验
+   + Docker 对象快照/清理骨架（fake runner 测试）。
+2. 宿主侧一次性 `/work` 副本、文件清单与差异、哈希上限。
+3. `import` / `test` 固定命令表 + 工具预检（工具缺失记为 `skipped_tool_missing`，
+   不要当成测试失败）。
+4. 有界流式输出捕获、进程/资源采样、超时与 OOM（`docker inspect .State.OOMKilled`）。
+5. `BehaviorReport` 接入 pipeline + Markdown 区块 + verdict caveat（timeout/OOM/
+   integrity 的 INSPECT floor，永不升级、永不自动 AVOID）。
+6. 手动 Docker 冒烟（先问用户是否允许在本机运行容器）。

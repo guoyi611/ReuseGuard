@@ -28,6 +28,12 @@ DEFAULT_USER_AGENT = f"reuseguard/{__version__}"
 
 _POLICY_VERSION = 1
 _TOP_LEVEL_KEYS = {"version", "thresholds", "limits", "features", "rules", "suppress"}
+
+# Known external scanner rule-ID prefixes. A rule ID like ``gitleaks:aws-access-token``
+# is accepted in ``rules.disable`` / ``rules.severity`` when its prefix matches one of
+# these entries. Unknown prefixes are still rejected as ConfigError so a typo or an
+# unvetted scanner cannot silently weaken the policy.
+_EXTERNAL_RULE_PREFIXES: tuple[str, ...] = ("gitleaks:", "osv:", "semgrep:")
 _THRESHOLD_KEYS = {"scorecard_min", "use_scorecard_min"}
 _LIMIT_KEYS = {
     "max_candidates",
@@ -247,12 +253,19 @@ def _reject_unknown(payload: dict[str, Any], allowed: set[str], context: str) ->
         raise ConfigError(f"unknown {context} key(s): {', '.join(unknown)}")
 
 
+def _is_known_rule_id(rule_id: str) -> bool:
+    """Return True when ``rule_id`` is a built-in rule or has a known external prefix."""
+    if rule_id in KNOWN_RULE_IDS:
+        return True
+    return any(rule_id.startswith(prefix) for prefix in _EXTERNAL_RULE_PREFIXES)
+
+
 def _rule_ids(value: Any, context: str) -> frozenset[str]:
     if value is None:
         return frozenset()
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ConfigError(f"{context} must be a list of rule IDs")
-    unknown = sorted(set(value) - KNOWN_RULE_IDS)
+    unknown = sorted({rid for rid in value if not _is_known_rule_id(rid)})
     if unknown:
         raise ConfigError(f"unknown rule ID(s) in {context}: {', '.join(unknown)}")
     return frozenset(value)
@@ -265,7 +278,7 @@ def _severity_overrides(value: Any) -> dict[str, RiskLevel]:
         raise ConfigError("rules.severity must be a mapping of rule ID to severity")
     overrides: dict[str, RiskLevel] = {}
     for rule_id, severity in value.items():
-        if not isinstance(rule_id, str) or rule_id not in KNOWN_RULE_IDS:
+        if not isinstance(rule_id, str) or not _is_known_rule_id(rule_id):
             raise ConfigError(f"unknown rule ID in rules.severity: {rule_id!r}")
         if not isinstance(severity, str):
             raise ConfigError(f"severity for {rule_id} must be a string")

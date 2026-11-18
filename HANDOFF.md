@@ -517,6 +517,35 @@ queries = ['ai pixel art generator ...', 'ai pixel ...']
 
 当前 `.worktrees/` 下已有 5 个 worktree，全部指向 `2db0e9a`；`git worktree list` 可查看。
 
+## 4.14 本会话（2026-11-12）：外部规则 ID 进入 YAML 策略（feat/policy-external-rules）
+
+YAML 策略的 `rules.disable` / `rules.severity` 现在接受外部扫描器的规则 ID，不再只认
+内置 `KNOWN_RULE_IDS`。采用**已知前缀白名单**而非放开任意字符串：
+
+- 新增 `_EXTERNAL_RULE_PREFIXES = ("gitleaks:", "osv:", "semgrep:")`
+- 新增 `_is_known_rule_id()`：内置 ID 或带已知前缀的外部 ID 均视为合法
+- `_rule_ids()` 和 `_severity_overrides()` 改用 `_is_known_rule_id()` 校验
+- 未知前缀（如 `bandit:`、`custom:`、拼写错误 `gitleak:`）仍报 `ConfigError`
+- 非法 severity 值仍然直接报错，不静默忽略
+- 与内置规则同名时不会冲突：外部规则都带前缀（`gitleaks:private-key` ≠ `private-key`）
+- `merge_scan_reports()` 的去重逻辑基于 `(rule_id, path, line)`，不受影响
+
+测试 +10（`tests/test_policy.py`）：
+
+- 外部规则 ID 在 disable / severity 中的接受
+- 内置与外部混合使用
+- 未知前缀拒绝（参数化 5 种情况）
+- 外部规则的非法 severity 拒绝
+- merge_scan_reports 去重不受影响
+
+总数 375 → 385；pytest / ruff 全绿。
+
+`examples/reuseguard.yaml` 已更新，注释中说明外部规则前缀并给出示例。
+
+诚实边界：此改动只放宽了 YAML 配置校验，**不改扫描器本身**。外部规则 ID 只有在对应
+扫描器实际产生该 rule_id 的 finding 时才会生效；disable 一个从未出现的规则 ID 是安全的
+空操作。
+
 ## 5. 如何运行
 
 ```powershell
@@ -738,8 +767,8 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 
 ### 9.4 小项（穿插做）
 
-- 外部规则 ID 进入 `rules.disable` / `rules.severity`：给 policy 加“外部规则前缀”白名单，
-  不要直接放开任意字符串。
+- ~~外部规则 ID 进入 `rules.disable` / `rules.severity`~~ **已在 4.14 完成**：已知前缀
+  白名单（`gitleaks:` / `osv:` / `semgrep:`），未知前缀仍报 ConfigError。
 - `.semgrepignore` 覆盖缺口：是否在隔离副本里删掉它，或改成显式文件列表。
 - OSV 离线数据库模式；`--no-resolve` 是否默认开启（收紧 registry 访问）。
 - 开发依赖噪音：`--osv` 会把 devDependencies 一起报出来（lodash 119 条），是否加过滤开关。

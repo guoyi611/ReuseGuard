@@ -1,0 +1,1 @@
+KEY = "-----BEGIN PRIVATE KEY-----"

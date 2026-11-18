@@ -1,0 +1,2 @@
+rules:
+  severity: {py-eval-exec: severe}

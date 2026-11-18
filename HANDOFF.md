@@ -517,6 +517,35 @@ queries = ['ai pixel art generator ...', 'ai pixel ...']
 
 当前 `.worktrees/` 下已有 5 个 worktree，全部指向 `2db0e9a`；`git worktree list` 可查看。
 
+## 4.14 本会话（2026-11-12）：外部规则 ID 进入 YAML 策略（feat/policy-external-rules）
+
+YAML 策略的 `rules.disable` / `rules.severity` 现在接受外部扫描器的规则 ID，不再只认
+内置 `KNOWN_RULE_IDS`。采用**已知前缀白名单**而非放开任意字符串：
+
+- 新增 `_EXTERNAL_RULE_PREFIXES = ("gitleaks:", "osv:", "semgrep:")`
+- 新增 `_is_known_rule_id()`：内置 ID 或带已知前缀的外部 ID 均视为合法
+- `_rule_ids()` 和 `_severity_overrides()` 改用 `_is_known_rule_id()` 校验
+- 未知前缀（如 `bandit:`、`custom:`、拼写错误 `gitleak:`）仍报 `ConfigError`
+- 非法 severity 值仍然直接报错，不静默忽略
+- 与内置规则同名时不会冲突：外部规则都带前缀（`gitleaks:private-key` ≠ `private-key`）
+- `merge_scan_reports()` 的去重逻辑基于 `(rule_id, path, line)`，不受影响
+
+测试 +10（`tests/test_policy.py`）：
+
+- 外部规则 ID 在 disable / severity 中的接受
+- 内置与外部混合使用
+- 未知前缀拒绝（参数化 5 种情况）
+- 外部规则的非法 severity 拒绝
+- merge_scan_reports 去重不受影响
+
+总数 375 → 385；pytest / ruff 全绿。
+
+`examples/reuseguard.yaml` 已更新，注释中说明外部规则前缀并给出示例。
+
+诚实边界：此改动只放宽了 YAML 配置校验，**不改扫描器本身**。外部规则 ID 只有在对应
+扫描器实际产生该 rule_id 的 finding 时才会生效；disable 一个从未出现的规则 ID 是安全的
+空操作。
+
 ## 5. 如何运行
 
 ```powershell
@@ -738,8 +767,8 @@ $env:PYTHONPATH = "src"   # 包没装进 .venv
 
 ### 9.4 小项（穿插做）
 
-- 外部规则 ID 进入 `rules.disable` / `rules.severity`：给 policy 加“外部规则前缀”白名单，
-  不要直接放开任意字符串。
+- ~~外部规则 ID 进入 `rules.disable` / `rules.severity`~~ **已在 4.14 完成**：已知前缀
+  白名单（`gitleaks:` / `osv:` / `semgrep:`），未知前缀仍报 ConfigError。
 - `.semgrepignore` 覆盖缺口：是否在隔离副本里删掉它，或改成显式文件列表。
 - OSV 离线数据库模式；`--no-resolve` 是否默认开启（收紧 registry 访问）。
 - 开发依赖噪音：`--osv` 会把 devDependencies 一起报出来（lodash 119 条），是否加过滤开关。
@@ -887,3 +916,115 @@ reports/test-2d-pixel-after-fix.md（reports/ 已 gitignore）。
 
 汇报：先说人话，再说改了什么、验证结果、下一步。
 ```
+
+## 4.14 本会话（2026-11-12）：发现质量 P1 — 查询约束、来源标注、许可证警告、评分权重
+
+在 `feat/discovery-quality` worktree 中完成四项 P1 改进：
+
+### 1. `--strict-idea` 查询字段约束
+
+`build_idea_queries()` 新增 `strict` 参数；启用时所有查询追加
+`in:name,description,topics` 限定符，避免短词（`ai`、`2d`）匹配 README 正文导致
+召回大量无关大仓库。CLI 新增 `--strict-idea` 开关，`Settings.strict_idea` 写入
+`public_dict()`。限定后召回数量下降是预期行为，不是回归。
+
+### 2. 候选来源标注
+
+`Candidate` 新增 `recalled_by: str | None` 字段，记录首次召回该仓库的查询文本。
+`recall_idea()` 和 `recall_similar()` 在去重时记录来源。Markdown 报告在每个仓库
+区块显示 `**Recalled by:**`；JSON 通过 `to_dict()` 自动包含。
+
+### 3. License unknown 警告
+
+当 `RepoMeta.license_spdx` 为空（GitHub 返回 null、NOASSERTION 或 NONE）时：
+- Markdown 报告在 Stats 行下方显式提示 "⚠️ License not declared: ... Manual
+  confirmation is required before reuse."
+- `decide()` 在 `base_limitations` 中追加 "The repository does not declare an SPDX
+  license; reuse rights are unconfirmed."
+
+### 4. 关键词得分权重复核
+
+`score_idea_similarity()` 重新分配权重：
+- 关键词覆盖率：40 → **50**（区分 name/topics 精确匹配 1.0 和 description 模糊
+  匹配 0.7）
+- 热度：20 → **10**
+- 语言 / 活跃度不变（各 20）
+
+效果：具体限定词（`template`、`beginner`、`lora`）对排名的影响增大，高 stars 但
+无关的仓库不再轻易淹没精确匹配的小项目。`score_similarity()`（种子模式）不受影响。
+
+### 验证
+
+- pytest：**390 passed**（+15 新测试）
+- ruff check：全绿
+- 未改动扫描器、verdict 判定逻辑、sandbox、外部扫描器代码
+- 未把"没有召回"写成"安全"
+
+### 下一步
+
+- 用真实 `--idea "AI 2D pixel art generator" --strict-idea` 重跑对比排序
+
+## 4.15 本会话（2026-11-12）：scanner-hardening 五项加固
+
+在 `feat/scanner-hardening` worktree 完成五项扫描器加固，全部测试通过（402 passed），
+ruff 全绿，已 push。
+
+### 4.15.1 OSV 默认 `--no-resolve` + `--osv-offline DB_PATH`
+
+- `_build_argv` 默认追加 `--no-resolve`，收紧 registry 访问；用户可用新 CLI
+  `--osv-resolve` 显式恢复传递依赖解析。
+- 新增 `--osv-offline DB_PATH`：DB_PATH 必须存在且是目录；适配器同时传
+  `--offline --local-db <path>`；与 `--osv-resolve` 互斥（离线模式下无 registry）。
+- Settings 新增 `osv_no_resolve`（默认 True）、`osv_offline_db`；进入 `public_dict()`。
+- 测试：argv 构造、互斥校验、路径不存在/非目录报错、CLI 转发。
+
+### 4.15.2 OSV dev/prod 分层显示
+
+- `Finding` 新增可选字段 `scope: str | None`（"production" / "development" / None）。
+- OSV 适配器按 lockfile 信号推断 scope：npm `package-lock.json` 的 `dev`/`optional`
+  标记、pip `requirements-dev.txt` / `requirements-test.txt` 文件名约定。未知生态
+  保留 None，不猜。
+- 同一 advisory 命中 prod+dev 包时聚合为 production（保守）。
+- Markdown：summary 行显示 "N production + M development"；prod findings 先列，
+  dev findings 折叠在 `<details>` 块并标注"仍计入 verdict"。
+- JSON：`Finding.scope` 自动序列化。
+- severity / verdict / risk 计算不变；dev 漏洞仍影响结论（构建链风险）。
+
+### 4.15.3 CVSS 向量/分数与 advisory 标签同时显示
+
+- 新增 `_cvss_label()` 从 `database_specific.cvss.score` / `.vectorString` 提取
+  人类可读摘要；不改 severity 判定（仍按 advisory 标签）。
+- Finding.evidence 末尾追加 CVSS 摘要；Finding.message 追加
+  "Advisory severity <TAG>; CVSS <score> (<source>)." 让用户看到两种口径差异。
+- 原始 advisory 标签（如 MODERATE）单独记录，不被映射后的 ReuseGuard severity
+  覆盖。
+- 无 CVSS 数据的 advisory 渲染不变。
+
+### 4.15.4 gitleaks `--gitleaks-config PATH`（强制 useDefault）
+
+- 新增 `--gitleaks-config PATH`：TOML 文件，必须存在且是文件；隐含开启 `--gitleaks`。
+- 适配器读取用户 TOML 后检查是否已有 `[extend] useDefault = true`；没有就追加。
+  团队可加自定义 `[[rules]]`，但不能关掉默认规则集。
+- 仓库内 `.gitleaks.toml` 仍被忽略（`--config` 指向私有临时文件）。
+- 缺文件/不可读 → scan error，不静默降级。
+- 零依赖：用简单字符串匹配而非 TOML 解析器。
+
+### 4.15.5 Semgrep 验收文档
+
+- 新增 `docs/semgrep-acceptance.md`：列出真实二进制验收步骤、预期结果、
+  `.semgrepignore` 影响验证方法、失败处理、验收后要更新的文件清单。
+- **未实际执行**：等用户提供本地规则目录。不要为了跑通用 `--config auto`。
+
+### 4.15.6 约束遵守情况
+
+- 未改召回 / verdict 核心判定 / sandbox / report 渲染（除 scanner 相关 caveat）。
+- 未静默降级：所有工具失败仍是 scan error。
+- 每步补测试 → pytest + ruff → commit + push（SSH）。
+- 测试数 375 → 402（+27），ruff 全绿。
+
+### 4.15.7 下一步
+
+- 用户提供 Semgrep 规则后按 `docs/semgrep-acceptance.md` 跑真实验收，结果写回
+  HANDOFF 4.2 / 9.2。
+- 开放问题（project.md §12 #11–#14）本轮已全部处理；剩余 #7（`.semgrepignore`
+  覆盖缺口）待 Semgrep 验收后决定缓解方案。

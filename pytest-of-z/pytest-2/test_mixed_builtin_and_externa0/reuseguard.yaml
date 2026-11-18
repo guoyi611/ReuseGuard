@@ -1,0 +1,8 @@
+
+rules:
+  disable:
+    - generic-secret
+    - gitleaks:generic-api-key
+  severity:
+    py-eval-exec: high
+    osv:GHSA-xxxx-yyyy-zzzz: low

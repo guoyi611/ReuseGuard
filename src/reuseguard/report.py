@@ -168,6 +168,8 @@ def _render_assessment(
 
     lines.append(f"- **Repository:** [{repo.full_name}]({_repo_url(repo)})")
     lines.append(f"- **Role:** {_role(assessment)}")
+    if assessment.candidate.recalled_by:
+        lines.append(f"- **Recalled by:** `{_code(assessment.candidate.recalled_by, 260)}`")
     if assessment.candidate.similarity:
         similarity = assessment.candidate.similarity
         components: list[str] = []
@@ -183,11 +185,17 @@ def _render_assessment(
             ]
         )
         lines.append(f"- **Similarity:** {similarity.total:.1f}/100 ({' · '.join(components)})")
+    license_display = repo.license_spdx or "license unknown"
     lines.append(
         f"- **Stats:** {repo.stars:,} stars · {repo.forks:,} forks · "
         f"{_md(repo.language or 'language unknown', 40)} · "
-        f"{_md(repo.license_spdx or 'license unknown', 40)}"
+        f"{_md(license_display, 40)}"
     )
+    if not repo.license_spdx:
+        lines.append(
+            "- ⚠️ **License not declared:** the repository does not specify an SPDX "
+            "license. Manual confirmation is required before reuse."
+        )
     lines.append(
         f"- **Activity:** last push {_format_date(repo.pushed_at) or 'unknown'} · "
         f"created {_format_date(repo.created_at) or 'unknown'}"
@@ -234,10 +242,17 @@ def _render_assessment(
     lines.extend(["", f"### Static scan — {_scan_risk(assessment)}", ""])
     scan = assessment.scan
     if scan.status is ScanStatus.SCANNED:
+        dev_count = sum(1 for f in scan.effective_findings if f.scope == "development")
+        eff_total = len(scan.effective_findings)
+        if dev_count:
+            prod_count = eff_total - dev_count
+            eff_label = f"{prod_count} production + {dev_count} development"
+        else:
+            eff_label = f"{eff_total}"
         lines.append(
             f"`{scan.scanner}` scanned {scan.files_scanned:,} files "
             f"({_format_bytes(scan.bytes_scanned)}) with "
-            f"{len(scan.effective_findings)} effective finding(s) and "
+            f"{eff_label} effective finding(s) and "
             f"{len(scan.suppressed_findings)} suppressed."
         )
         if scan.truncated:
@@ -255,17 +270,51 @@ def _render_assessment(
             scan.effective_findings,
             key=lambda finding: (-finding.severity.rank, finding.path, finding.line or 0),
         )
-        if effective:
-            lines.extend(["", "| Severity | Rule | Location | Detail |", "|---|---|---|---|"])
-            for finding in effective[:_MAX_FINDINGS_IN_REPORT]:
+        prod = [f for f in effective if f.scope != "development"]
+        dev = [f for f in effective if f.scope == "development"]
+        if prod:
+            label = "Production findings" if dev else "Findings"
+            lines.extend(
+                [
+                    "",
+                    f"**{label}**",
+                    "",
+                    "| Severity | Rule | Location | Detail |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for finding in prod[:_MAX_FINDINGS_IN_REPORT]:
                 lines.append(_finding_row(finding))
-            if len(effective) > _MAX_FINDINGS_IN_REPORT:
+            if len(prod) > _MAX_FINDINGS_IN_REPORT:
                 lines.append(
-                    f"\n*{len(effective) - _MAX_FINDINGS_IN_REPORT} more effective finding(s) "
+                    f"\n*{len(prod) - _MAX_FINDINGS_IN_REPORT} more production finding(s) "
                     "are available in the JSON export.*"
                 )
-        else:
+        elif not dev:
             lines.append("No matching risk patterns were found.")
+
+        if dev:
+            lines.extend(
+                [
+                    "",
+                    "<details>",
+                    f"<summary>{len(dev)} development-only finding(s) (collapsed)</summary>",
+                    "",
+                    "These affect dev/test dependencies. They still count toward the verdict "
+                    "because build-tool vulnerabilities can compromise the release pipeline.",
+                    "",
+                    "| Severity | Rule | Location | Detail |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for finding in dev[:_MAX_FINDINGS_IN_REPORT]:
+                lines.append(_finding_row(finding))
+            if len(dev) > _MAX_FINDINGS_IN_REPORT:
+                lines.append(
+                    f"\n*{len(dev) - _MAX_FINDINGS_IN_REPORT} more development finding(s) "
+                    "are available in the JSON export.*"
+                )
+            lines.extend(["", "</details>"])
 
         suppressed = scan.suppressed_findings
         if suppressed:

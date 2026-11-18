@@ -1,0 +1,25 @@
+
+version: 1
+thresholds:
+  scorecard_min: 3.0
+  use_scorecard_min: 6.0
+limits:
+  max_candidates: 2
+  min_stars: 10
+  max_repo_mb: 20
+  max_files: 50
+  max_file_kb: 128
+  max_scan_mb: 2
+  timeout: 5.0
+features:
+  recall: false
+  scorecard: true
+  scan: true
+rules:
+  disable:
+    - generic-secret
+  severity:
+    py-eval-exec: high
+suppress:
+  paths:
+    - "src/generated/**"

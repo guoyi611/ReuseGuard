@@ -479,3 +479,200 @@ def test_non_directory_root_returns_error_without_running(tmp_path: Path) -> Non
 def test_options_reject_unsafe_values(kwargs: dict) -> None:
     with pytest.raises(OsvError):
         OsvOptions(**kwargs)
+
+
+def test_default_argv_enables_no_resolve(tmp_path: Path) -> None:
+    """By default osv-scanner must not reach out to a package registry."""
+    root = _root(tmp_path)
+    runner = _Runner(_payload())
+
+    _scanner(runner).scan(root)
+
+    argv = runner.calls[0][0]
+    assert "--no-resolve" in argv
+    assert "--offline" not in argv
+    assert "--local-db" not in argv
+
+
+def test_resolve_opt_out_removes_no_resolve_flag(tmp_path: Path) -> None:
+    """Users can opt back into transitive resolution explicitly."""
+    root = _root(tmp_path)
+    runner = _Runner(_payload())
+    scanner = OsvScanner(
+        OsvOptions(process_timeout=30.0, no_resolve=False),
+        runner=runner,
+    )
+
+    scanner.scan(root)
+
+    argv = runner.calls[0][0]
+    assert "--no-resolve" not in argv
+
+
+def test_offline_db_injects_offline_and_local_db_flags(tmp_path: Path) -> None:
+    """Offline mode passes both --offline and --local-db <path>."""
+    root = _root(tmp_path)
+    db = tmp_path / "osv-db"
+    db.mkdir()
+    runner = _Runner(_payload())
+    scanner = OsvScanner(
+        OsvOptions(process_timeout=30.0, offline_db=db),
+        runner=runner,
+    )
+
+    scanner.scan(root)
+
+    argv = runner.calls[0][0]
+    assert "--offline" in argv
+    idx = argv.index("--local-db")
+    assert argv[idx + 1] == str(db)
+    # offline implies no-resolve; the adapter should still emit the flag so the
+    # command line is self-describing even if osv-scanner's defaults change.
+    assert "--no-resolve" in argv
+
+
+def test_options_reject_offline_with_resolve_enabled() -> None:
+    """Offline matching has no registry to resolve against; refuse the combo."""
+    with pytest.raises(OsvError, match="offline"):
+        OsvOptions(process_timeout=30.0, no_resolve=False, offline_db=Path("/tmp/db"))
+
+
+def _package_entry(
+    name: str = "example",
+    version: str = "1.3.1",
+    ecosystem: str = "npm",
+    *,
+    dev: bool | None = None,
+    optional: bool | None = None,
+) -> dict:
+    pkg: dict = {"name": name, "version": version, "ecosystem": ecosystem}
+    if dev is not None:
+        pkg["dev"] = dev
+    if optional is not None:
+        pkg["optional"] = optional
+    return {
+        "package": pkg,
+        "vulnerabilities": [_vuln()],
+        "groups": [{"ids": [GHSA]}],
+    }
+
+
+def test_npm_dev_dependency_is_tagged_development(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package_entry(dev=True)])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert len(report.findings) == 1
+    finding = report.findings[0]
+    assert finding.scope == "development"
+    assert "Development-only dependency" in finding.message
+
+
+def test_npm_production_dependency_is_tagged_production(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package_entry(dev=False)])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope == "production"
+    assert "Production dependency" in report.findings[0].message
+
+
+def test_npm_optional_dependency_counts_as_development(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package_entry(optional=True)])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope == "development"
+
+
+def test_mixed_prod_and_dev_packages_mark_advisory_as_production(tmp_path: Path) -> None:
+    """If any affected package is prod, the advisory stays production-scoped."""
+    root = _root(tmp_path)
+    packages = [
+        _package_entry(name="prod-pkg", dev=False),
+        _package_entry(name="dev-pkg", dev=True),
+    ]
+    results = [_result(packages=packages)]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    # Both packages share one advisory (same GHSA + lockfile); aggregated scope wins.
+    assert len(report.findings) == 1
+    assert report.findings[0].scope == "production"
+
+
+def test_pip_dev_requirements_file_is_tagged_development(tmp_path: Path) -> None:
+    root = tmp_path / "pip-tree"
+    root.mkdir()
+    (root / "requirements-dev.txt").write_text("example==1.0\n", encoding="utf-8")
+    results = [
+        _result(
+            path="requirements-dev.txt",
+            packages=[_package_entry(ecosystem="PyPI")],
+        )
+    ]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope == "development"
+
+
+def test_unknown_ecosystem_scope_is_none(tmp_path: Path) -> None:
+    """Without a known signal we must not guess."""
+    root = tmp_path / "cargo-tree"
+    root.mkdir()
+    (root / "Cargo.lock").write_text("", encoding="utf-8")
+    results = [_result(path="Cargo.lock", packages=[_package_entry(ecosystem="crates.io")])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    assert report.findings[0].scope is None
+
+
+def _vuln_with_cvss(
+    score: float | None = 7.5,
+    vector: str | None = None,
+    source: str | None = "NVD",
+    severity_label: str | None = "MODERATE",
+) -> dict:
+    vuln = _vuln(severity=severity_label)
+    cvss: dict = {}
+    if score is not None:
+        cvss["score"] = score
+    if vector is not None:
+        cvss["vectorString"] = vector
+    if source is not None:
+        cvss["type"] = source
+    vuln["database_specific"] = {**(vuln.get("database_specific") or {}), "cvss": cvss}
+    return vuln
+
+
+def test_cvss_score_is_shown_alongside_advisory_severity(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package(vulnerabilities=[_vuln_with_cvss()])])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    finding = report.findings[0]
+    # Severity still comes from the advisory label, not the CVSS score.
+    assert finding.severity is RiskLevel.MEDIUM
+    assert "CVSS 7.5 (NVD)" in (finding.evidence or "")
+    assert "Advisory severity MODERATE; CVSS 7.5 (NVD)" in finding.message
+
+
+def test_cvss_vector_only_is_rendered_when_score_missing(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    vector = "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    results = [
+        _result(packages=[_package(vulnerabilities=[_vuln_with_cvss(score=None, vector=vector)])])
+    ]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    finding = report.findings[0]
+    assert f"CVSS vector: {vector}" in (finding.evidence or "")
+
+
+def test_no_cvss_data_leaves_evidence_unchanged(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    results = [_result(packages=[_package(vulnerabilities=[_vuln(severity="HIGH")])])]
+    report = _scanner(_Runner(_payload(results))).scan(root)
+
+    finding = report.findings[0]
+    assert "CVSS" not in (finding.evidence or "")
+    assert "CVSS" not in finding.message

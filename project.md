@@ -1,4 +1,4 @@
-# ReuseGuard 项目设计
+﻿# ReuseGuard 项目设计
 
 > 复用开源项目前的安全准入编排层。
 >
@@ -44,9 +44,11 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 - 外部扫描器：osv-scanner 适配器（`--osv`，lockfile 依赖漏洞、别名合并、追加合并）
 - 结论：USE / INSPECT FIRST / AVOID + 置信度 + 理由 + 局限
 - 输出：Markdown / JSON
-- CLI：`check`、`--idea`、`--discover-only`（配合 `--no-scan`）、`--config`、
-  `--semgrep-config`、`--gitleaks`、`--osv`、`--sandbox`、`demo`、`--fail-on`、
-  `--keep-workdir`
+- CLI：`check`、`--idea`、`--strict-idea`、`--discover-only`（配合 `--no-scan`）、
+  `--config`、`--semgrep-config`、`--gitleaks`、`--osv`、`--sandbox`、`demo`、
+  `--fail-on`、`--keep-workdir`
+- 发现质量 P1：查询字段约束（`in:name,description,topics`）、候选来源标注
+  （`recalled_by`）、license unknown 警告、关键词评分权重优化（50/20/20/10）
 - 策略：YAML 阈值、限制、规则启停、severity 覆盖、抑制路径
 - 沙箱隔离检查（默认关闭）：Docker 检测、加固 `docker run`、容器内隔离探测、
   报告区块；`--sandbox auto` 只跑 high/critical，`--sandbox` / `all` 跑全部
@@ -61,9 +63,9 @@ ReuseGuard 不发明新的召回算法，也不发明新的检测技术。它做
 
 - 在沙箱内执行仓库行为（安装、导入、运行测试）；设计草案见
   [docs/m4-behavior-probe.md](docs/m4-behavior-probe.md)（待确认，尚未实现）
-- OSV 离线数据库模式（当前 `--osv` 需要网络）
-- gitleaks 自定义规则集（当前固定使用二进制内置规则）
 - 私有仓库的完整支持（取决于 token 权限与 Scorecard 覆盖）
+- Semgrep 真实二进制验收（验收清单见 [docs/semgrep-acceptance.md](docs/semgrep-acceptance.md)，
+  待用户提供本地规则后执行）
 
 ## 5. 架构
 
@@ -158,13 +160,18 @@ topic → 出现在仓库名里的 topic → 带连字符的 topic → 较短的
 1. 前 4 个关键词 + `--language` + stars / fork
 2. 前 2 个关键词 + `--language` + stars / fork（更宽）
 
-若没有 ASCII 关键词（例如纯中文需求），把清洗后的原文作为查询词。候选按以下 0–100
-分排序：
+`--strict-idea` 启用时，所有查询追加 `in:name,description,topics` 限定符，避免短词
+匹配 README 正文导致召回大量无关大仓库。限定后召回数量下降是预期行为。
 
-- 关键词覆盖率 × 40：仓库名、描述、topics 的 token 中命中了多少需求关键词
+若没有 ASCII 关键词（例如纯中文需求），把清洗后的原文作为查询词。每个候选记录
+`recalled_by`（首次召回它的查询文本），在 Markdown 和 JSON 中展示。
+
+候选按以下 0–100 分排序：
+
+- 关键词覆盖率 × **50**：name/topics 精确匹配计 1.0，description 模糊匹配计 0.7
 - 语言：指定语言时相同 20，不同 0；未指定时中性 10
 - 最近 push：20
-- 热度：20
+- 热度：**10**（降低以避免淹没具体限定词）
 
 `--idea` 模式不评估种子仓库，所有候选的 role 为 `candidate`；报告头使用 `Idea:` 而不是
 `Seed:`。`--idea` 与 URL 互斥，且不能与 `--no-recall` 同用。
@@ -277,13 +284,18 @@ scan risk low/none:
 - `thresholds`：`scorecard_min`、`use_scorecard_min`
 - `limits`：候选数、星标门槛、下载 / 扫描上限、超时
 - `features`：`recall` / `scorecard` / `scan` 开关
-- `rules.disable`：按 rule ID 关闭规则
-- `rules.severity`：把规则覆盖为 low / medium / high / critical
+- `rules.disable`：按 rule ID 关闭规则（支持内置 ID 和带已知前缀的外部 ID）
+- `rules.severity`：把规则覆盖为 low / medium / high / critical（同上）
 - `suppress.paths`：额外抑制 glob
 
-优先级：显式 CLI > YAML > 内置默认。未知 key、未知 rule ID、非法 severity 或类型错误
-都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()` 会把最终生效的
-规则策略写入报告，便于审计。
+外部规则 ID 采用**已知前缀白名单**：`gitleaks:`、`osv:`、`semgrep:`。例如
+`gitleaks:aws-access-token`、`osv:GHSA-abcd-1234-wxyz`、
+`semgrep:python.lang.security.eval-detected` 都是合法的 rule ID。未知前缀
+（如 `bandit:`、拼写错误 `gitleak:`）仍然报 `ConfigError`。
+
+优先级：显式 CLI > YAML > 内置默认。未知 key、未知 rule ID（含未知前缀）、非法
+severity 或类型错误都会直接报 `ConfigError`，不会静默忽略。`Settings.public_dict()`
+会把最终生效的规则策略写入报告，便于审计。
 
 ### 7.7 沙箱隔离检查（M4，默认关闭）
 
@@ -384,9 +396,12 @@ gitleaks dir <root>
   接受时（退出码 126）报 scan error，而不是静默降级。
 - **被检查的仓库不能决定规则。** gitleaks 默认会读快照内的 `.gitleaks.toml`（可整体替换
   或 allowlist 规则）、`.gitleaksignore`（按 fingerprint 忽略发现）和 `# gitleaks:allow`
-  行内注释。适配器固定 `--config` 为 ReuseGuard 生成的最小配置
-  （`[extend] useDefault = true`，即二进制内置规则），`--gitleaks-ignore-path` 指向空目录，
+  行内注释。适配器固定 `--config` 为 ReuseGuard 生成的配置（默认仅
+  `[extend] useDefault = true`，即二进制内置规则），`--gitleaks-ignore-path` 指向空目录，
   并加 `--ignore-gitleaks-allow`。
+- **团队自定义规则**：`--gitleaks-config PATH` 接受本地 TOML 文件；适配器读取后
+  强制追加 `[extend] useDefault = true`（如已有则保留），确保默认规则集不能被关掉。
+  传入自定义 config 隐含开启 `--gitleaks`。仓库内 `.gitleaks.toml` 仍被忽略。
 - JSON 报告写到私有临时目录（不写快照），读取上限 16 MB；`--max-target-megabytes`
   跟随 `--max-file-kb`（向上取整）。
 - 凭据脱敏：工具先 `--redact`，适配器再从 `Secret` 字段替换一次。`Finding.evidence`
@@ -425,15 +440,25 @@ osv-scanner scan source --recursive <root> --format json --output-file <tmp>/osv
   不同 lockfile 各自一条（`path` 不同，合并时不会被去重掉）。
 - severity 取 `database_specific.severity` / `ecosystem_specific.severity` 标签。
   **只有 CVSS 向量时按 medium 记录**，不在本地重算分数（算错成 critical 比保守的
-  medium 更糟）。
+  medium 更糟）。当 advisory 同时携带 CVSS 分数或向量时，Finding.evidence 与
+  Finding.message 并列显示两种口径（如 "Advisory severity MODERATE; CVSS 7.5 (NVD)"），
+  判定仍按 advisory 标签。
 - `rule_id = osv:<首选编号>`，`category="dependency"`，`path=lockfile`，`line=None`；
-  `evidence` 只放 `包名@版本` 和 `https://osv.dev/vulnerability/<id>`。
+  `evidence` 放 `包名@版本`、CVSS 摘要（如有）和 `https://osv.dev/vulnerability/<id>`。
+- **默认传 `--no-resolve`**：osv-scanner 只信 lockfile 已记录的依赖，不为不完整
+  manifest 访问包管理器 registry。用户可用 `--osv-resolve` 显式恢复传递依赖解析。
+- **离线模式**：`--osv-offline DB_PATH` 同时传 `--offline --local-db <path>`；
+  DB_PATH 必须存在且是目录；与 `--osv-resolve` 互斥。
+- **dev/prod scope**：Finding.scope 字段标记 "production" / "development" / None，
+  按 npm `dev`/`optional` 标记与 pip requirements 文件名约定推断；未知生态不猜。
+  Markdown 把 dev findings 折叠在 `<details>` 块，prod 先列；severity 与 verdict
+  不受影响。
 - 复用 `suppression_reason()`：tests/fixtures 下的 lockfile 命中记为 suppressed。
 - **没有 lockfile（退出码 128）→ `SCANNED` + `truncated=True`**，结论至少 INSPECT，并写
   warning。绝不能把“没找到 lockfile”当成“没有漏洞依赖”。
 
-诚实边界：只覆盖 osv-scanner 认识的 lockfile；`--osv` 会访问 `api.osv.dev`（解析不完整的
-锁文件时可能还会访问包管理器 registry），只发包名和版本；离线数据库模式未实现。
+诚实边界：只覆盖 osv-scanner 认识的 lockfile；默认 `--no-resolve` 下不再访问包管理器
+registry，仅查询 `api.osv.dev`（或 `--osv-offline` 指定的本地数据库）。
 
 ## 8. 安全模型
 
@@ -573,7 +598,8 @@ reuseguard check psf/requests --no-recall --osv
   - osv-scanner 适配器（追加式）
     - `adapters/osv.py`：`scan source --recursive`、别名分组、退出码语义、缺 lockfile 标记
     - `--osv` / `--osv-timeout`；依赖漏洞按 advisory 标签定级
-  - 待办：外部规则 ID 进入 `rules.disable` / `rules.severity`；OSV 离线数据库；真实二进制验收
+  - 外部规则 ID 进入 `rules.disable` / `rules.severity`（已知前缀白名单，已完成）
+  - 待办：OSV 离线数据库；真实二进制验收
 - **M6（已完成）**：YAML 策略
   - `--config PATH`
   - 阈值、限制、features 开关、规则启停、severity 覆盖、抑制 glob
@@ -583,6 +609,11 @@ reuseguard check psf/requests --no-recall --osv
   - `--discover-only`：扫描关闭时 Markdown 隐藏结论，JSON 用 `withheld` 标记；
     不改变 `decide()`
   - 召回边界过滤非法仓库名（`owner/.github`），写 warning，不再中断整次运行
+- **发现质量 P1（2026-11-12，已完成）**：
+  - `--strict-idea`：查询追加 `in:name,description,topics` 限定符
+  - 候选来源标注：`Candidate.recalled_by` 记录首次召回查询
+  - License unknown 警告：报告 + verdict limitations 显式提示
+  - 关键词评分权重：50/20/20/10，区分精确/模糊匹配
 
 ## 11. 决策记录
 
@@ -618,6 +649,11 @@ reuseguard check psf/requests --no-recall --osv
 | OSV 缺 severity | 保守为 medium，不本地算 CVSS | 算错成 critical 比保守的 medium 更糟 |
 | OSV 无 lockfile | `truncated=True` → 至少 INSPECT | “没找到 lockfile”不能写成“没有漏洞依赖” |
 
+| `--strict-idea` | 追加 `in:name,description,topics` | 短词匹配 README 会召回无关大仓库；限定后召回下降是预期行为 |
+| 候选来源标注 | `Candidate.recalled_by` | 用户需要知道每个候选由哪条查询召回，便于调试查询策略 |
+| License unknown | 报告 + verdict limitations 显式提示 | 未声明许可证的仓库复用权利不明，必须人工确认 |
+| 关键词评分权重 | 50/20/20/10，精确匹配 1.0 / 模糊 0.7 | 具体限定词不应被 stars 淹没；description-only 匹配降权避免 README 噪音 |
+
 ## 12. 开放问题
 
 1. **召回质量**：topic 稀疏的仓库召回效果有限；是否需要 LLM 扩展查询？
@@ -636,19 +672,19 @@ reuseguard check psf/requests --no-recall --osv
    是否需要在隔离副本中删除该文件，或直接传入显式文件列表？
 8. **策略演进**：YAML schema 后续如何做版本迁移和团队继承？
 9. **报告规模**：候选很多时 Markdown 会很长；是否需要摘要模式？
-10. **gitleaks 自定义规则**：当前固定使用二进制内置规则并刻意忽略仓库配置；是否需要
-    `--gitleaks-config PATH`（同样必须是本地路径）让团队注入自己的 TOML？
-11. **OSV 离线模式**：`--osv` 目前必须联网（`api.osv.dev`）。是否增加
-    `--osv-offline` + 本地数据库路径，让不能联网的环境也能查依赖漏洞？
-12. **OSV registry 访问**：解析不完整的锁文件时 osv-scanner 可能访问包管理器 registry。
-    是否默认加 `--no-resolve`（只信 lockfile、不解析传递依赖）来收紧网络边界？
-13. **开发依赖噪音**：`--osv` 会把 devDependencies 一起报出来（lodash 实测 119 条）。
-    是否加“只看生产依赖”的开关，或在报告里把 dev/prod 分层显示？
-14. **依赖漏洞的等级口径**：当前用 advisory 标签；实测 osv-scanner 按 CVSS 会多报一条
-    High（GitHub 标 MODERATE、CVSS ≥ 7）。是否本地实现 CVSS v3 计算，或同时显示两种口径？
-15. **短词召回噪音**：`ai` / `2d` 进入查询后，GitHub 会匹配 README，可能召回
-    `china-dictatorship` 这类同时包含这些词的大仓库。是否给 `--idea` 查询加
-    `in:name,description,topics`，或提供 `--strict-idea`？
+10. ~~**gitleaks 自定义规则**~~：**已实现**（2026-11-12，scanner-hardening）。
+    `--gitleaks-config PATH` 接受本地 TOML；适配器强制追加 `[extend] useDefault = true`，
+    团队可加自定义规则但不能关掉默认集；仓库内 `.gitleaks.toml` 仍被忽略。
+11. ~~**OSV 离线模式**~~：**已实现**（2026-11-12，scanner-hardening）。
+    `--osv-offline DB_PATH` 传 `--offline --local-db <path>`；DB_PATH 必须存在且是目录。
+12. ~~**OSV registry 访问**~~：**已实现**（2026-11-12，scanner-hardening）。
+    默认传 `--no-resolve`；用户可用 `--osv-resolve` 显式恢复传递依赖解析。
+13. ~~**开发依赖噪音**~~：**已实现**（2026-11-12，scanner-hardening）。
+    Finding.scope 标记 prod/dev；Markdown 折叠 dev findings；severity/verdict 不变。
+14. ~~**依赖漏洞的等级口径**~~：**已实现**（2026-11-12，scanner-hardening）。
+    Finding.evidence/message 并列显示 advisory 标签与 CVSS 分数/向量；判定仍按标签。
+15. ~~**短词召回噪音**~~：**已解决**（2026-11-12，discovery-quality）。`--strict-idea` 新增
+    `in:name,description,topics` 限定符；关键词评分区分精确/模糊匹配；热度权重降至 10。
 
 ## 13. 如何扩展
 

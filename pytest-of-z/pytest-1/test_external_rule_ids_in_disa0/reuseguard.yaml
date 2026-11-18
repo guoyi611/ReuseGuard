@@ -1,0 +1,6 @@
+
+rules:
+  disable:
+    - gitleaks:aws-access-token
+    - osv:GHSA-abcd-1234-wxyz
+    - semgrep:python.lang.security.eval-detected

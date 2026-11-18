@@ -376,6 +376,272 @@ class SandboxReport:
     command: list[str] = field(default_factory=list)
 
 
+class BehaviorMode(str, Enum):
+    """Which behavior phases the user asked for; ``OFF`` never runs anything."""
+
+    OFF = "off"
+    IMPORT = "import"
+    TEST = "test"
+    ALL = "all"
+
+
+class BehaviorStatus(str, Enum):
+    """The outcome of one behavior-probe run (design section 9.3).
+
+    These values describe what the probe was able to observe, never whether the
+    repository is harmless: ``COMPLETED`` means "every requested phase ran and
+    evidence was collected", not "the code is safe".
+    """
+
+    DISABLED = "disabled"
+    UNAVAILABLE = "unavailable"
+    REFUSED = "refused"
+    COMPLETED = "completed"
+    TIMEOUT = "timeout"
+    ERROR = "error"
+    PARTIAL = "partial"
+    INTEGRITY_FAILURE = "integrity_failure"
+
+
+class BehaviorPhaseStatus(str, Enum):
+    """The outcome of a single behavior phase (design section 4.5)."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    OOM = "oom"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
+    KILLED = "killed"
+    SKIPPED_UNSUPPORTED = "skipped_unsupported"
+    SKIPPED_TOOL_MISSING = "skipped_tool_missing"
+    SKIPPED_CACHE_MISSING = "skipped_cache_missing"
+    NOT_RUN = "not_run"
+    DOCKER_ERROR = "docker_error"
+
+
+class TrustLevel(str, Enum):
+    """How much an evidence item can be relied on (design section 9.1)."""
+
+    HOST_OBSERVED = "host_observed"
+    HOST_SAMPLED = "host_sampled"
+    PROXY_OBSERVED = "proxy_observed"
+    UNTRUSTED_REPO_OUTPUT = "untrusted_repo_output"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass
+class CapturedStream:
+    """A bounded tail of one output stream.
+
+    Repository output is always ``UNTRUSTED_REPO_OUTPUT``: it is a clue, never
+    a fact. ``bytes`` counts what was produced, not what was kept.
+    """
+
+    tail: str = ""
+    bytes: int = 0
+    truncated: bool = False
+    trust: TrustLevel = TrustLevel.UNTRUSTED_REPO_OUTPUT
+
+
+@dataclass
+class ToolPreflight:
+    """Result of checking that the image actually contains the phase tool.
+
+    A missing tool is recorded here so it is not misread as a failing test.
+    """
+
+    argv: list[str] = field(default_factory=list)
+    exit_code: int | None = None
+    stderr_tail: str | None = None
+
+
+@dataclass
+class BehaviorPhase:
+    """One fixed-argv phase executed in its own container."""
+
+    name: str
+    argv: list[str] = field(default_factory=list)
+    cwd: str = "/work/repo"
+    exit_code: int | None = None
+    docker_exit_code: int | None = None
+    signal: int | None = None
+    status: BehaviorPhaseStatus = BehaviorPhaseStatus.NOT_RUN
+    timed_out: bool = False
+    oom_killed: bool = False
+    duration_seconds: float = 0.0
+    stdout: CapturedStream = field(default_factory=CapturedStream)
+    stderr: CapturedStream = field(default_factory=CapturedStream)
+    tool_preflight: ToolPreflight | None = None
+    error: str | None = None
+
+
+@dataclass
+class ProcessSample:
+    """One process seen by host-side sampling; short-lived processes may be missed."""
+
+    pid: int
+    ppid: int | None = None
+    uid: int | None = None
+    comm: str = ""
+    cmdline: str = ""
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    samples: int = 1
+
+
+@dataclass
+class ProcessEvidence:
+    """The sampled process table for one run."""
+
+    samples: list[ProcessSample] = field(default_factory=list)
+    sampled: bool = False
+    interval_ms: int | None = None
+    unique: int = 0
+    truncated: bool = False
+    trust: TrustLevel = TrustLevel.HOST_SAMPLED
+    note: str | None = None
+
+
+@dataclass
+class FileChange:
+    """One final-state file difference under ``<workdir>``.
+
+    Only final state is observable: creating and deleting a file inside one
+    phase leaves no trace.
+    """
+
+    path: str
+    type: str = "file"
+    size: int = 0
+    mode: str | None = None
+    sha256: str | None = None
+    content_verified: bool = False
+    phase: str | None = None
+
+
+@dataclass
+class FileEvidence:
+    """Final-state file differences for one run."""
+
+    created: list[FileChange] = field(default_factory=list)
+    modified: list[FileChange] = field(default_factory=list)
+    deleted: list[FileChange] = field(default_factory=list)
+    truncated: bool = False
+    trust: TrustLevel = TrustLevel.HOST_OBSERVED
+    note: str | None = None
+
+
+@dataclass
+class NetworkEvidence:
+    """What the host can observe about the container network.
+
+    With ``--network none`` an empty ``connections`` list means "no egress
+    capability", not "no connection was attempted": failed attempts cannot be
+    enumerated.
+    """
+
+    mode: str = "none"
+    egress_possible: bool = False
+    connections: list[str] = field(default_factory=list)
+    listening_sockets: list[str] = field(default_factory=list)
+    trust: TrustLevel = TrustLevel.HOST_OBSERVED
+    note: str | None = None
+
+
+@dataclass
+class ResourceUsage:
+    """Sampled peaks; never a complete account of what the code did."""
+
+    peak_memory_bytes: int | None = None
+    peak_pids: int | None = None
+    cpu_seconds: float | None = None
+    oom_killed: bool = False
+    oom_suspected: bool = False
+    trust: TrustLevel = TrustLevel.HOST_SAMPLED
+
+
+@dataclass
+class IntegrityEvidence:
+    """Checks that the isolation actually behaved as planned.
+
+    ``tamper_possible`` is always True: observed code can delete or overwrite
+    its own traces before the host inspects final state.
+    """
+
+    preflight_ok: bool | None = None
+    canary_ok: bool | None = None
+    unexpected_docker_objects: list[str] = field(default_factory=list)
+    tamper_possible: bool = True
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BehaviorImage:
+    """The digest-pinned image a behavior run used."""
+
+    reference: str
+    repo_digest: str | None = None
+    image_id: str | None = None
+    os: str | None = None
+    architecture: str | None = None
+    digest_verified: bool | None = None
+
+
+@dataclass
+class BehaviorLimits:
+    """Limits one behavior run was planned with (design section 12.1)."""
+
+    total_timeout_seconds: float = 300.0
+    phase_timeout_seconds: float = 120.0
+    max_output_bytes: int = 65536
+    max_work_bytes: int = 512 * 1024 * 1024
+    max_work_files: int = 50000
+
+
+@dataclass
+class BehaviorReport:
+    """Evidence from one behavior-probe run.
+
+    The probe executes repository code inside a disposable, digest-pinned
+    container. A report is a record of one run of one snapshot on one machine;
+    ``COMPLETED`` in particular is not evidence of safety.
+    """
+
+    status: BehaviorStatus
+    schema: str = "reuseguard.behavior/1"
+    run_id: str | None = None
+    tool_version: str | None = None
+    protocol_version: int = 1
+    platform: dict[str, Any] = field(default_factory=dict)
+    image: BehaviorImage | None = None
+    container: dict[str, Any] = field(default_factory=dict)
+    limits: BehaviorLimits = field(default_factory=BehaviorLimits)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_seconds: float = 0.0
+    phases: list[BehaviorPhase] = field(default_factory=list)
+    processes: ProcessEvidence = field(default_factory=ProcessEvidence)
+    files: FileEvidence = field(default_factory=FileEvidence)
+    network: NetworkEvidence = field(default_factory=NetworkEvidence)
+    resources: ResourceUsage = field(default_factory=ResourceUsage)
+    integrity: IntegrityEvidence = field(default_factory=IntegrityEvidence)
+    truncations: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def executed(self) -> bool:
+        """True only when at least one phase really ran repository code.
+
+        ``refused`` / ``unavailable`` / ``disabled`` reports leave every phase
+        at ``not_run``, so callers can avoid implying a dynamic check happened.
+        """
+        return any(
+            phase.status not in {BehaviorPhaseStatus.NOT_RUN, BehaviorPhaseStatus.DOCKER_ERROR}
+            for phase in self.phases
+        )
+
+
 @dataclass
 class Verdict:
     """A recommendation plus the evidence and caveats behind it.
@@ -394,13 +660,19 @@ class Verdict:
 
 @dataclass
 class Assessment:
-    """Everything ReuseGuard knows about one repository."""
+    """Everything ReuseGuard knows about one repository.
+
+    ``sandbox`` is the containment probe (isolated but never executes
+    repository code). ``behavior`` is the behavior probe, which does execute
+    repository code and is therefore ``None`` unless explicitly requested.
+    """
 
     candidate: Candidate
     filter: FilterResult
     scan: ScanReport
     verdict: Verdict
     sandbox: SandboxReport | None = None
+    behavior: BehaviorReport | None = None
 
 
 @dataclass
